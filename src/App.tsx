@@ -16,10 +16,13 @@ import {
   Users,
   Volume2,
   VolumeX,
+  Wifi,
 } from 'lucide-react';
+import { io, type Socket } from 'socket.io-client';
 import { HomeBackdrop, PunoLogo } from './components/HomeVisuals.tsx';
 import { QrInviteModal } from './components/QrInviteModal.tsx';
 import { PunoCanvasEngine } from './game/canvasRenderer.ts';
+import { buildApiUrl, getSocketServerUrl, wakeBackendServer } from './lib/backend.ts';
 import {
   canPlayCard,
   chooseCpuCard,
@@ -49,7 +52,6 @@ import {
   type GameMode,
   type PlayerRole,
   type SeatInfo,
-  type ServerWsMessage,
   type SuitColor,
   type TurnPhase,
 } from './game/types.ts';
@@ -87,7 +89,7 @@ interface SoloInternalState {
 }
 
 function getOrCreateClientId(scopeKey: string): string {
-  const storageKey = `puno-client-${scopeKey}`;
+  const storageKey = `puno-client-${scopeKey.toUpperCase()}`;
   try {
     const existing = localStorage.getItem(storageKey);
     if (existing) return existing;
@@ -99,6 +101,53 @@ function getOrCreateClientId(scopeKey: string): string {
     return generated;
   } catch {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+const ACTIVE_SESSION_KEY = 'puno-active-multiplayer-session';
+
+interface SavedMultiplayerSession {
+  roomId: string;
+  token: string;
+  name: string;
+}
+
+function saveMultiplayerSession(session: SavedMultiplayerSession): void {
+  try {
+    sessionStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(session));
+  } catch {
+    // ignore
+  }
+}
+
+function loadMultiplayerSession(): SavedMultiplayerSession | null {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedMultiplayerSession>;
+    if (
+      typeof parsed.roomId === 'string' &&
+      parsed.roomId.trim() &&
+      typeof parsed.token === 'string' &&
+      parsed.token.trim()
+    ) {
+      return {
+        roomId: parsed.roomId.trim().toUpperCase(),
+        token: parsed.token.trim(),
+        name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : 'Player',
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function clearMultiplayerSession(): void {
+  try {
+    sessionStorage.removeItem(ACTIVE_SESSION_KEY);
+  } catch {
+    // ignore
   }
 }
 
@@ -378,9 +427,11 @@ export default function App() {
 
   const [roomId, setRoomId] = useState<string | null>(inviteRoomParam);
   const [roomToken, setRoomToken] = useState<string | null>(inviteTokenParam);
+  const [joinCodeDraft, setJoinCodeDraft] = useState('');
   const [showQrModal, setShowQrModal] = useState(false);
   const [roomBusy, setRoomBusy] = useState(false);
   const [networkError, setNetworkError] = useState<string | null>(null);
+  const [wsStatus, setWsStatus] = useState<'idle' | 'connecting' | 'connected' | 'reconnecting'>('idle');
   const [multiView, setMultiView] = useState<ClientGameView | null>(null);
 
   const soloRef = useRef<SoloInternalState | null>(null);
@@ -390,8 +441,8 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<PunoCanvasEngine | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<number | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const activeJoinNameRef = useRef<string>(playerName);
   const modeRef = useRef<GameMode>(mode);
   const roomIdRef = useRef<string | null>(roomId);
   const roomTokenRef = useRef<string | null>(roomToken);
@@ -1208,120 +1259,192 @@ export default function App() {
   );
 
   const sendWsAction = useCallback((action: ClientWsAction) => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(action));
+    const socket = socketRef.current;
+    if (!socket || !socket.connected) return;
+    const { type, ...payload } = action;
+    socket.emit(type, payload);
+  }, []);
+
+  const disconnectMultiplayer = useCallback(() => {
+    if (socketRef.current) {
+      const oldSocket = socketRef.current;
+      socketRef.current = null;
+      oldSocket.removeAllListeners();
+      oldSocket.disconnect();
     }
+    clearMultiplayerSession();
+    setWsStatus('idle');
+    setNetworkError(null);
   }, []);
 
   const connectMultiplayer = useCallback(
-    (targetRoomId: string, targetToken: string, joinName: string, retryCount = 0) => {
-      if (reconnectTimerRef.current) {
-        window.clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-      if (wsRef.current) {
-        const oldWs = wsRef.current;
-        wsRef.current = null;
-        oldWs.close();
+    (targetRoomId: string, targetToken: string, joinName: string) => {
+      if (socketRef.current) {
+        const oldSocket = socketRef.current;
+        socketRef.current = null;
+        oldSocket.removeAllListeners();
+        oldSocket.disconnect();
       }
 
-      const clientId = getOrCreateClientId(targetRoomId);
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${proto}//${window.location.host}/ws`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-      let opened = false;
+      const cleanRoomId = targetRoomId.trim().toUpperCase();
+      activeJoinNameRef.current = joinName;
+      saveMultiplayerSession({ roomId: cleanRoomId, token: targetToken, name: joinName });
 
-      ws.addEventListener('open', () => {
-        opened = true;
-        setNetworkError(null);
-        ws.send(
-          JSON.stringify({
-            type: 'join',
-            roomId: targetRoomId,
-            token: targetToken,
-            clientId,
-            name: joinName,
-          } satisfies ClientWsAction)
+      let serverUrl: string | undefined;
+      try {
+        serverUrl = getSocketServerUrl();
+      } catch (err) {
+        setWsStatus('idle');
+        setNetworkError(
+          err instanceof Error
+            ? err.message
+            : 'Multiplayer server URL is not configured.'
         );
+        return;
+      }
+
+      setWsStatus('connecting');
+      const clientId = getOrCreateClientId(cleanRoomId);
+
+      const socket = io(serverUrl, {
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: 20,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        timeout: 20000,
+      });
+      socketRef.current = socket;
+      let wokeBackend = false;
+
+      socket.on('connect', () => {
+        if (socketRef.current !== socket) return;
+        setWsStatus('connected');
+        setNetworkError(null);
+        socket.emit('join', {
+          roomId: cleanRoomId,
+          token: targetToken,
+          clientId,
+          name: activeJoinNameRef.current,
+        });
       });
 
-      ws.addEventListener('message', (event) => {
-        let msg: ServerWsMessage;
-        try {
-          msg = JSON.parse(String(event.data)) as ServerWsMessage;
-        } catch {
-          return;
+      socket.on('state', (msg: { view: ClientGameView; effects: EffectEvent[] }) => {
+        if (socketRef.current !== socket || !msg?.view) return;
+        setNetworkError(null);
+        setMultiView(msg.view);
+        setScreen(msg.view.turn === 'over' ? 'GAME_OVER' : 'PLAYING');
+        if (msg.view.turn !== 'over') {
+          setWinMilestone(null);
         }
-
-        if (msg.type === 'error') {
-          setNetworkError(msg.message);
-          soundFx.playError();
-          return;
+        if (prevWaitingRef.current && msg.view.turn !== 'waiting') {
+          setShowQrModal(false);
         }
-
-        if (msg.type === 'state') {
-          setNetworkError(null);
-          setMultiView(msg.view);
-          setScreen(msg.view.turn === 'over' ? 'GAME_OVER' : 'PLAYING');
-          if (msg.view.turn !== 'over') {
+        prevWaitingRef.current = msg.view.turn === 'waiting';
+        const enrichedEffects = (msg.effects ?? []).map((eff) => {
+          if (eff.kind === 'win' && eff.winnerRole === msg.view.selfRole) {
+            const milestone = recordSelfWin(`mp-${msg.view.roomId}-${msg.view.roundId}`);
+            return { ...eff, milestone };
+          }
+          if (eff.kind === 'win') {
             setWinMilestone(null);
           }
-          if (prevWaitingRef.current && msg.view.turn !== 'waiting') {
-            setShowQrModal(false);
-          }
-          prevWaitingRef.current = msg.view.turn === 'waiting';
-          const enrichedEffects = msg.effects.map((eff) => {
-            if (eff.kind === 'win' && eff.winnerRole === msg.view.selfRole) {
-              const milestone = recordSelfWin(`mp-${msg.view.roomId}-${msg.view.roundId}`);
-              return { ...eff, milestone };
-            }
-            if (eff.kind === 'win') {
-              setWinMilestone(null);
-            }
-            return eff;
-          });
-          engineRef.current?.syncView(msg.view, enrichedEffects);
-          playSoundForEffects(enrichedEffects);
+          return eff;
+        });
+        engineRef.current?.syncView(msg.view, enrichedEffects);
+        playSoundForEffects(enrichedEffects);
+      });
+
+      socket.on('game_error', (payload: { message?: string }) => {
+        if (socketRef.current !== socket) return;
+        setNetworkError(payload?.message || 'Multiplayer error.');
+        soundFx.playError();
+      });
+
+      socket.on('connect_error', () => {
+        if (socketRef.current !== socket) return;
+        setWsStatus('reconnecting');
+        if (!wokeBackend) {
+          wokeBackend = true;
+          void wakeBackendServer();
         }
       });
 
-      ws.addEventListener('close', () => {
-        if (wsRef.current !== ws) return;
-        const shouldReconnect =
+      socket.on('disconnect', (reason) => {
+        if (socketRef.current !== socket) return;
+        const shouldStay =
           modeRef.current === 'multiplayer' &&
-          roomIdRef.current === targetRoomId &&
+          roomIdRef.current?.toUpperCase() === cleanRoomId &&
           roomTokenRef.current === targetToken;
-        if (!shouldReconnect) return;
-
-        if (!opened && retryCount >= 2) {
-          setNetworkError('Live multiplayer server is unavailable here. Use Solo vs CPU instead.');
+        if (!shouldStay || reason === 'io client disconnect') {
+          setWsStatus('idle');
           return;
         }
+        setWsStatus('reconnecting');
+      });
 
-        reconnectTimerRef.current = window.setTimeout(() => {
-          if (
-            modeRef.current === 'multiplayer' &&
-            roomIdRef.current === targetRoomId &&
-            roomTokenRef.current === targetToken
-          ) {
-            connectMultiplayer(targetRoomId, targetToken, joinName, opened ? 0 : retryCount + 1);
-          }
-        }, 1500);
+      socket.io.on('reconnect_attempt', () => {
+        if (socketRef.current !== socket) return;
+        setWsStatus('reconnecting');
+      });
+
+      socket.io.on('reconnect_failed', () => {
+        if (socketRef.current !== socket) return;
+        setWsStatus('idle');
+        setNetworkError(
+          'Unable to reach the multiplayer server right now. Check your connection or try again.'
+        );
       });
     },
     [playSoundForEffects, recordSelfWin]
   );
 
+  // Resume active multiplayer session on page reload (unless opening a new invite link)
+  useEffect(() => {
+    if (isGuestInvite) return;
+    const saved = loadMultiplayerSession();
+    if (!saved) return;
+    modeRef.current = 'multiplayer';
+    roomIdRef.current = saved.roomId;
+    roomTokenRef.current = saved.token;
+    prevWaitingRef.current = true;
+    setRoomId(saved.roomId);
+    setRoomToken(saved.token);
+    setMode('multiplayer');
+    connectMultiplayer(saved.roomId, saved.token, saved.name);
+  }, [connectMultiplayer, isGuestInvite]);
+
+  // Reconnect promptly when device regains network or tab returns to foreground
+  useEffect(() => {
+    const maybeReconnect = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (modeRef.current !== 'multiplayer') return;
+      const activeRoom = roomIdRef.current;
+      const activeToken = roomTokenRef.current;
+      if (!activeRoom || !activeToken) return;
+      const socket = socketRef.current;
+      if (!socket) {
+        connectMultiplayer(activeRoom, activeToken, activeJoinNameRef.current);
+      } else if (!socket.connected) {
+        socket.connect();
+      }
+    };
+    window.addEventListener('online', maybeReconnect);
+    document.addEventListener('visibilitychange', maybeReconnect);
+    return () => {
+      window.removeEventListener('online', maybeReconnect);
+      document.removeEventListener('visibilitychange', maybeReconnect);
+    };
+  }, [connectMultiplayer]);
+
   useEffect(() => {
     return () => {
       clearSoloTimers();
-      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) {
-        const oldWs = wsRef.current;
-        wsRef.current = null;
-        oldWs.close();
+      if (socketRef.current) {
+        const oldSocket = socketRef.current;
+        socketRef.current = null;
+        oldSocket.removeAllListeners();
+        oldSocket.disconnect();
       }
     };
   }, [clearSoloTimers]);
@@ -1338,13 +1461,13 @@ export default function App() {
     setNetworkError(null);
     clearSoloTimers();
     try {
-      const res = await fetch('/api/rooms', {
+      const res = await fetch(buildApiUrl('/api/rooms'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hostName: cleanName, difficulty, playerCount }),
       });
       if (res.status === 404 || res.status === 405) {
-        throw new Error('Multiplayer QR rooms require the Node server. Solo vs CPU works everywhere!');
+        throw new Error('Multiplayer backend endpoint not found. Check VITE_BACKEND_URL.');
       }
       if (!res.ok) throw new Error('Could not create multiplayer room.');
       const data = (await res.json()) as { roomId: string; token: string };
@@ -1359,6 +1482,54 @@ export default function App() {
       connectMultiplayer(data.roomId, data.token, cleanName);
     } catch (err) {
       setNetworkError(err instanceof Error ? err.message : 'Failed to create room.');
+    } finally {
+      setRoomBusy(false);
+    }
+  };
+
+  const handleJoinByCode = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const cleanCode = joinCodeDraft.toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
+    if (cleanCode.length < 4) {
+      setNetworkError('Enter the 6-character room code to join.');
+      return;
+    }
+    const cleanName = nameDraft.trim() || playerName;
+    setPlayerName(cleanName);
+    try {
+      localStorage.setItem('puno-player-name', cleanName);
+    } catch {
+      // ignore
+    }
+    setRoomBusy(true);
+    setNetworkError(null);
+    clearSoloTimers();
+    try {
+      const clientId = getOrCreateClientId(cleanCode);
+      const res = await fetch(buildApiUrl('/api/rooms/join'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId: cleanCode, clientId }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        roomId?: string;
+        token?: string;
+        error?: string;
+      };
+      if (!res.ok || !payload.roomId || !payload.token) {
+        throw new Error(payload.error || 'Could not join room.');
+      }
+      modeRef.current = 'multiplayer';
+      roomIdRef.current = payload.roomId;
+      roomTokenRef.current = payload.token;
+      prevWaitingRef.current = true;
+      setRoomId(payload.roomId);
+      setRoomToken(payload.token);
+      setMode('multiplayer');
+      setShowQrModal(false);
+      connectMultiplayer(payload.roomId, payload.token, cleanName);
+    } catch (err) {
+      setNetworkError(err instanceof Error ? err.message : 'Failed to join room.');
     } finally {
       setRoomBusy(false);
     }
@@ -1733,16 +1904,13 @@ export default function App() {
           onClick={() => {
             if (screen !== 'TITLE_MENU') {
               clearSoloTimers();
-              if (reconnectTimerRef.current) {
-                window.clearTimeout(reconnectTimerRef.current);
-                reconnectTimerRef.current = null;
-              }
-              if (wsRef.current) {
-                const oldWs = wsRef.current;
-                wsRef.current = null;
-                oldWs.close();
-              }
+              disconnectMultiplayer();
               modeRef.current = 'solo';
+              roomIdRef.current = null;
+              roomTokenRef.current = null;
+              setRoomId(null);
+              setRoomToken(null);
+              setMultiView(null);
               setMode('solo');
               setScreen('TITLE_MENU');
             }
@@ -2155,41 +2323,71 @@ export default function App() {
                       </motion.button>
                     </div>
                   ) : (
-                    <div className="flex flex-col sm:flex-row gap-3 pt-1">
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        type="button"
-                        onClick={() => {
-                          const cleaned = nameDraft.trim() || 'Player';
-                          setPlayerName(cleaned);
-                          try {
-                            localStorage.setItem('puno-player-name', cleaned);
-                          } catch {
-                            // ignore
+                    <div className="space-y-3 pt-1">
+                      <div className="flex flex-col sm:flex-row gap-3">
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          type="button"
+                          onClick={() => {
+                            const cleaned = nameDraft.trim() || 'Player';
+                            setPlayerName(cleaned);
+                            try {
+                              localStorage.setItem('puno-player-name', cleaned);
+                            } catch {
+                              // ignore
+                            }
+                            startSoloRound(cleaned, false);
+                          }}
+                          className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                          style={{ backgroundColor: activeTheme.accent }}
+                        >
+                          {playerCount === 2 ? 'Play vs CPU' : `Play vs ${playerCount - 1} CPUs`}
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          type="button"
+                          disabled={roomBusy}
+                          onClick={handleHostMultiplayer}
+                          className="h-12 inline-flex items-center justify-center gap-2 px-5 rounded-xl disabled:opacity-50 text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                          style={{
+                            backgroundColor: 'rgba(255,255,255,0.04)',
+                            borderColor: activeTheme.surfaceBorder,
+                          }}
+                        >
+                          <Users className="w-4 h-4" style={{ color: activeTheme.accent }} />
+                          <span>{roomBusy ? 'Creating...' : `Create ${playerCount}P Room`}</span>
+                        </motion.button>
+                      </div>
+
+                      <form onSubmit={handleJoinByCode} className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          maxLength={10}
+                          value={joinCodeDraft}
+                          onChange={(e) =>
+                            setJoinCodeDraft(
+                              e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')
+                            )
                           }
-                          startSoloRound(cleaned, false);
-                        }}
-                        className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                        style={{ backgroundColor: activeTheme.accent }}
-                      >
-                        {playerCount === 2 ? 'Play vs CPU' : `Play vs ${playerCount - 1} CPUs`}
-                      </motion.button>
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        type="button"
-                        disabled={roomBusy}
-                        onClick={handleHostMultiplayer}
-                        className="h-12 inline-flex items-center justify-center gap-2 px-5 rounded-xl disabled:opacity-50 text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                        style={{
-                          backgroundColor: 'rgba(255,255,255,0.04)',
-                          borderColor: activeTheme.surfaceBorder,
-                        }}
-                      >
-                        <Users className="w-4 h-4" style={{ color: activeTheme.accent }} />
-                        <span>{roomBusy ? 'Creating...' : `Host ${playerCount}P QR`}</span>
-                      </motion.button>
+                          placeholder="Room code (e.g. K7M9P2)"
+                          aria-label="Enter room code to join"
+                          className="flex-1 h-10 px-3.5 rounded-xl bg-black/25 border text-[#f4f4ed] text-xs font-mono-tabular tracking-[0.14em] uppercase placeholder:tracking-normal placeholder:normal-case placeholder:font-sans placeholder:text-[#7e9491] focus:outline-none focus:border-white/40 transition-colors"
+                          style={{ borderColor: activeTheme.surfaceBorder }}
+                        />
+                        <button
+                          type="submit"
+                          disabled={roomBusy || joinCodeDraft.trim().length < 4}
+                          className="h-10 px-4 rounded-xl text-xs font-bold text-[#f4f4ed] border disabled:opacity-45 hover:bg-white/10 transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                          style={{
+                            backgroundColor: 'rgba(255,255,255,0.06)',
+                            borderColor: activeTheme.surfaceBorder,
+                          }}
+                        >
+                          {roomBusy ? 'Joining...' : 'Join Code'}
+                        </button>
+                      </form>
                     </div>
                   )}
                 </motion.div>
@@ -2342,13 +2540,26 @@ export default function App() {
                     </motion.button>
 
                     <div
-                      className="pointer-events-auto px-4 py-1.5 rounded-xl border text-xs sm:text-sm font-medium text-[#e6eeec] text-center max-w-md shadow-md backdrop-blur-sm"
+                      className="pointer-events-auto px-4 py-1.5 rounded-xl border text-xs sm:text-sm font-medium text-[#e6eeec] text-center max-w-md shadow-md backdrop-blur-sm inline-flex items-center gap-2"
                       style={{
                         backgroundColor: `${activeTheme.surface}e0`,
-                        borderColor: hasStack ? '#f43f5e' : activeTheme.surfaceBorder,
+                        borderColor: hasStack
+                          ? '#f43f5e'
+                          : mode === 'multiplayer' && wsStatus === 'reconnecting'
+                            ? '#f5c84b'
+                            : activeTheme.surfaceBorder,
                       }}
                     >
-                      {networkError || activeView.message}
+                      {mode === 'multiplayer' &&
+                        (wsStatus === 'connecting' || wsStatus === 'reconnecting') && (
+                          <Wifi className="w-3.5 h-3.5 text-[#f5c84b] animate-pulse shrink-0" />
+                        )}
+                      <span>
+                        {networkError ||
+                          (mode === 'multiplayer' && wsStatus === 'reconnecting'
+                            ? 'Reconnecting to multiplayer room...'
+                            : activeView.message)}
+                      </span>
                     </div>
                   </div>
 
@@ -2820,16 +3031,13 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       clearSoloTimers();
-                      if (reconnectTimerRef.current) {
-                        window.clearTimeout(reconnectTimerRef.current);
-                        reconnectTimerRef.current = null;
-                      }
-                      if (wsRef.current) {
-                        const oldWs = wsRef.current;
-                        wsRef.current = null;
-                        oldWs.close();
-                      }
+                      disconnectMultiplayer();
                       modeRef.current = 'solo';
+                      roomIdRef.current = null;
+                      roomTokenRef.current = null;
+                      setRoomId(null);
+                      setRoomToken(null);
+                      setMultiView(null);
                       setMode('solo');
                       setScreen('TITLE_MENU');
                     }}

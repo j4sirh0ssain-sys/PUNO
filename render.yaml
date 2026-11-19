@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: puno-multiplayer-server
+    runtime: node
+    rootDir: server
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGINS
+        value: https://j4sirh0ssain-sys.github.io
+      - key: FRONTEND_URL
+        value: https://j4sirh0ssain-sys.github.io/PUNO/

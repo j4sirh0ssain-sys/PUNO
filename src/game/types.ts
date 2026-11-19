@@ -220,6 +220,10 @@ export type ServerWsMessage =
   | {
       type: 'error';
       message: string;
+    }
+  | {
+      type: 'pong';
+      ts?: number;
     };
 
 export type ClientWsAction =
@@ -254,4 +258,8 @@ export type ClientWsAction =
   | {
       type: 'rename';
       name: string;
+    }
+  | {
+      type: 'ping';
+      ts?: number;
     };

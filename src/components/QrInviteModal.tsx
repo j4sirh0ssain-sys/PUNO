@@ -32,13 +32,14 @@ export function QrInviteModal({
   onClose,
 }: QrInviteModalProps) {
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   useEffect(() => {
     const canvas = qrCanvasRef.current;
     if (!canvas) return;
     void QRCode.toCanvas(canvas, inviteUrl, {
-      width: 200,
+      width: 184,
       margin: 2,
       color: {
         dark: '#0c1320',
@@ -47,11 +48,21 @@ export function QrInviteModal({
     });
   }, [inviteUrl]);
 
-  const handleCopy = async () => {
+  const handleCopyLink = async () => {
     try {
       await navigator.clipboard.writeText(inviteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 1800);
+    } catch {
+      // Fallback ignored if clipboard blocked
+    }
+  };
+
+  const handleCopyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(roomId);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 1800);
     } catch {
       // Fallback ignored if clipboard blocked
     }
@@ -87,16 +98,39 @@ export function QrInviteModal({
           </button>
         </div>
 
-        <p className="text-sm text-[#b8c7c5] mb-4">
-          Scan this QR code on another device or share the room link to join live.
+        <p className="text-sm text-[#b8c7c5] mb-3">
+          Scan the QR code on another device or enter this Room Code to join live:
         </p>
 
-        <div className="inline-block rounded-xl bg-white p-3 mb-4 shadow-lg">
+        {/* Prominent Room Code Copy Pill */}
+        <div className="flex items-center justify-center gap-2 mb-4">
+          <button
+            type="button"
+            onClick={handleCopyCode}
+            className="inline-flex items-center gap-2.5 px-4 py-2 rounded-xl bg-black/35 border hover:bg-black/45 transition-colors focus-visible:outline-2 focus-visible:outline-[#f5c84b]"
+            style={{ borderColor: theme?.surfaceBorder ?? '#284452' }}
+            title="Copy room code"
+          >
+            <span className="text-xs text-[#9fb3b0] font-medium">Room Code</span>
+            <span
+              className="font-mono-tabular text-lg font-extrabold tracking-[0.18em]"
+              style={{ color: theme?.accent ?? '#f5c84b' }}
+            >
+              {roomId}
+            </span>
+            {copiedCode ? (
+              <Check className="w-4 h-4 text-[#16b07a]" />
+            ) : (
+              <Copy className="w-4 h-4 text-[#9fb3b0]" />
+            )}
+          </button>
+        </div>
+
+        <div className="inline-block rounded-xl bg-white p-3 mb-3 shadow-lg">
           <canvas ref={qrCanvasRef} className="block" />
         </div>
 
         <div className="text-xs font-mono-tabular text-[#b8c7c5] mb-3">
-          Room {roomId} ·{' '}
           {playerCount === 2
             ? opponentConnected
               ? `${opponentName} connected`
@@ -139,11 +173,11 @@ export function QrInviteModal({
           />
           <button
             type="button"
-            onClick={handleCopy}
+            onClick={handleCopyLink}
             className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-[#f4f4ed] transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-[#f5c84b]"
           >
-            {copied ? <Check className="w-4 h-4 text-[#16b07a]" /> : <Copy className="w-4 h-4" />}
-            {copied ? 'Copied' : 'Copy Link'}
+            {copiedLink ? <Check className="w-4 h-4 text-[#16b07a]" /> : <Copy className="w-4 h-4" />}
+            {copiedLink ? 'Copied' : 'Copy Link'}
           </button>
         </div>
 
