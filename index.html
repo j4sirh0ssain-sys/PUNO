@@ -25,7 +25,7 @@
         var bootErr = '';
         function showFallback(reason) {
           if (!root || root.childElementCount > 0) return;
-          var isRawSource = !!document.querySelector('script[src="/src/main.tsx"]');
+          var isRawSource = !!document.querySelector('script[src$="main.tsx"]');
           var msg = isRawSource
             ? 'This site is serving unbuilt source files instead of the compiled bundle. On GitHub, open Settings → Pages → Build and deployment → Source → select "GitHub Actions", then run the "Deploy PUNO to GitHub Pages" workflow.'
             : reason || 'Unable to initialize the game script.';
@@ -45,10 +45,10 @@
         window.addEventListener('unhandledrejection', function (e) {
           if (!bootErr && e && e.reason) bootErr = String(e.reason.message || e.reason);
         });
-        var rawEntry = document.querySelector('script[src="/src/main.tsx"]');
+        var rawEntry = document.querySelector('script[src$="main.tsx"]');
         if (rawEntry) {
           rawEntry.addEventListener('error', function () {
-            showFallback('Failed to load unbuilt /src/main.tsx.');
+            showFallback('Failed to load unbuilt entry script.');
           });
           if (/\.github\.io$/i.test(window.location.hostname)) {
             setTimeout(function () { showFallback(bootErr); }, 800);

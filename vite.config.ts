@@ -6,10 +6,20 @@ import {fileURLToPath} from 'url';
 import {defineConfig} from 'vite';
 
 const configDir = path.dirname(fileURLToPath(import.meta.url));
+const rawBase = process.env.VITE_BASE_PATH?.trim();
+const resolvedBase = rawBase
+  ? rawBase.endsWith('/')
+    ? rawBase
+    : `${rawBase}/`
+  : './';
 
 export default defineConfig(() => {
   return {
-    base: './',
+    base: resolvedBase,
+    build: {
+      outDir: 'dist',
+      emptyOutDir: true,
+    },
     plugins: [
       react(),
       tailwindcss(),
