@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertTriangle,
@@ -17,16 +17,19 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
+import { HomeBackdrop, PunoLogo } from './components/HomeVisuals.tsx';
 import { QrInviteModal } from './components/QrInviteModal.tsx';
 import { PunoCanvasEngine } from './game/canvasRenderer.ts';
 import {
   canPlayCard,
   chooseCpuCard,
   chooseCpuWildColor,
-  dealRound,
+  clampPlayerCount,
+  dealRoundMulti,
   drawColorRoulette,
   drawOneFromDeck,
   getDrawAmount,
+  getNextAliveSeatIndex,
   isDifficultyLevel,
   shouldCpuCallUno,
 } from './game/engine.ts';
@@ -35,7 +38,9 @@ import { TABLE_THEMES, THEME_LIST, type TableTheme, type TableThemeId } from './
 import {
   COLORS,
   DIFFICULTY_LIST,
+  MAX_PLAYERS,
   MERCY_HAND_LIMIT,
+  MIN_PLAYERS,
   type Card,
   type ClientGameView,
   type ClientWsAction,
@@ -43,6 +48,7 @@ import {
   type EffectEvent,
   type GameMode,
   type PlayerRole,
+  type SeatInfo,
   type ServerWsMessage,
   type SuitColor,
   type TurnPhase,
@@ -50,21 +56,32 @@ import {
 
 type ScreenState = 'TITLE_MENU' | 'PLAYING' | 'GAME_OVER';
 
+interface SoloSeat {
+  index: number;
+  name: string;
+  isCpu: boolean;
+  hand: Card[];
+  unoArmed: boolean;
+  eliminated: boolean;
+  score: number;
+}
+
 interface SoloInternalState {
   difficulty: DifficultyLevel;
+  playerCount: number;
+  seats: SoloSeat[];
   deck: Card[];
-  playerHand: Card[];
-  cpuHand: Card[];
   discard: Card[];
   currentColor: SuitColor;
   turn: TurnPhase;
+  turnIndex: number;
+  direction: 1 | -1;
   drawnUid: number | null;
   pendingDrawStack: number;
   pendingDrawMin: number;
-  playerUnoArmed: boolean;
-  cpuUnoArmed: boolean;
   winner: PlayerRole | null;
-  score: { player: number; cpu: number };
+  winnerIndex: number | null;
+  winnerName: string | null;
   message: string;
   roundId: number;
 }
@@ -305,6 +322,15 @@ export default function App() {
   const activeDifficulty =
     DIFFICULTY_LIST.find((d) => d.id === difficulty) ?? DIFFICULTY_LIST[1];
 
+  const [playerCount, setPlayerCount] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('puno-player-count');
+      return saved ? clampPlayerCount(saved) : MIN_PLAYERS;
+    } catch {
+      return MIN_PLAYERS;
+    }
+  });
+
   const [playerName, setPlayerName] = useState<string>(() => {
     try {
       return localStorage.getItem('puno-player-name') || 'Player';
@@ -345,7 +371,15 @@ export default function App() {
   const engineRef = useRef<PunoCanvasEngine | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const modeRef = useRef<GameMode>(mode);
+  const roomIdRef = useRef<string | null>(roomId);
+  const roomTokenRef = useRef<string | null>(roomToken);
+  const prevWaitingRef = useRef(true);
   const [pointerActive, setPointerActive] = useState(false);
+
+  modeRef.current = mode;
+  roomIdRef.current = roomId;
+  roomTokenRef.current = roomToken;
 
   const activeView = mode === 'solo' ? soloView : multiView;
 
@@ -363,6 +397,16 @@ export default function App() {
     setDifficulty(next);
     try {
       localStorage.setItem('puno-difficulty', next);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const selectPlayerCount = useCallback((next: number) => {
+    const clamped = clampPlayerCount(next);
+    setPlayerCount(clamped);
+    try {
+      localStorage.setItem('puno-player-count', String(clamped));
     } catch {
       // ignore
     }
@@ -432,17 +476,39 @@ export default function App() {
     (effects: EffectEvent[] = []) => {
       const s = soloRef.current;
       if (!s) return;
+      const selfSeat = s.seats[0];
+      const primaryOpp = s.seats[1] ?? s.seats[0];
+      const bestOppScore = s.seats.reduce(
+        (max, seat) => (seat.index === 0 ? max : Math.max(max, seat.score)),
+        0
+      );
+      const seatInfos: SeatInfo[] = s.seats.map((seat) => ({
+        index: seat.index,
+        name: seat.name,
+        isCpu: seat.isCpu,
+        connected: true,
+        cardCount: seat.hand.length,
+        unoArmed: seat.unoArmed,
+        eliminated: seat.eliminated,
+        score: seat.score,
+      }));
+
       const view: ClientGameView = {
         roomId: 'SOLO',
         mode: 'solo',
         difficulty: s.difficulty,
+        playerCount: s.playerCount,
+        selfIndex: 0,
+        turnIndex: s.turn === 'host' || s.turn === 'guest' ? s.turnIndex : null,
+        direction: s.direction,
+        seats: seatInfos,
         selfRole: 'host',
-        selfName: playerName,
-        opponentName: 'CPU',
+        selfName: selfSeat.name,
+        opponentName: primaryOpp.name,
         opponentConnected: true,
-        selfHand: [...s.playerHand],
-        opponentCardIds: s.cpuHand.map((c) => c.uid),
-        opponentCount: s.cpuHand.length,
+        selfHand: [...selfSeat.hand],
+        opponentCardIds: s.playerCount === 2 ? primaryOpp.hand.map((c) => c.uid) : [],
+        opponentCount: primaryOpp.hand.length,
         discardPile: s.discard.slice(-5),
         deckCount: s.deck.length,
         currentColor: s.currentColor,
@@ -450,10 +516,12 @@ export default function App() {
         drawnUid: s.drawnUid,
         pendingDrawStack: s.pendingDrawStack,
         pendingDrawMin: s.pendingDrawMin,
-        selfUnoArmed: s.playerUnoArmed,
-        opponentUnoArmed: s.cpuUnoArmed,
+        selfUnoArmed: selfSeat.unoArmed,
+        opponentUnoArmed: primaryOpp.unoArmed,
         winner: s.winner,
-        score: { self: s.score.player, opponent: s.score.cpu },
+        winnerIndex: s.winnerIndex,
+        winnerName: s.winnerName,
+        score: { self: selfSeat.score, opponent: bestOppScore },
         message: s.message,
         roundId: s.roundId,
       };
@@ -464,56 +532,82 @@ export default function App() {
       engineRef.current?.syncView(view, effects);
       playSoundForEffects(effects);
     },
-    [playSoundForEffects, playerName]
+    [playSoundForEffects]
   );
 
   const startSoloRound = useCallback(
-    (nameOverride?: string, preserveScore = true, difficultyOverride?: DifficultyLevel) => {
+    (
+      nameOverride?: string,
+      preserveScore = true,
+      difficultyOverride?: DifficultyLevel,
+      playerCountOverride?: number
+    ) => {
       clearSoloTimers();
       setPendingWildUid(null);
       setWinMilestone(null);
       setNetworkError(null);
       const effectiveName = (nameOverride ?? playerName).trim() || 'Player';
       const effectiveDiff = difficultyOverride ?? difficulty;
+      const effectiveCount = clampPlayerCount(playerCountOverride ?? playerCount);
       const prev = soloRef.current;
-      const prevScore = preserveScore && prev ? prev.score : { player: 0, cpu: 0 };
       const nextRoundId = prev ? prev.roundId + 1 : 1;
 
-      const dealt = dealRound(effectiveName, effectiveDiff);
+      const seatNames = Array.from({ length: effectiveCount }, (_, idx) => {
+        if (idx === 0) return effectiveName;
+        return effectiveCount === 2 ? 'CPU' : `CPU ${idx}`;
+      });
+      const dealt = dealRoundMulti(seatNames, effectiveDiff);
+      const jasirBoost = dealt.jasirSeatIndexes.includes(0);
+
+      const seats: SoloSeat[] = seatNames.map((name, idx) => ({
+        index: idx,
+        name,
+        isCpu: idx > 0,
+        hand: dealt.hands[idx] ?? [],
+        unoArmed: false,
+        eliminated: false,
+        score:
+          preserveScore && prev && prev.playerCount === effectiveCount && prev.seats[idx]
+            ? prev.seats[idx].score
+            : 0,
+      }));
+
       soloRef.current = {
         difficulty: effectiveDiff,
+        playerCount: effectiveCount,
+        seats,
         deck: dealt.deck,
-        playerHand: dealt.hostHand,
-        cpuHand: dealt.guestHand,
         discard: dealt.discard,
         currentColor: dealt.currentColor,
         turn: 'dealing',
+        turnIndex: 0,
+        direction: 1,
         drawnUid: null,
         pendingDrawStack: 0,
         pendingDrawMin: 0,
-        playerUnoArmed: false,
-        cpuUnoArmed: false,
         winner: null,
-        score: prevScore,
-        message: dealt.jasirBoost
+        winnerIndex: null,
+        winnerName: null,
+        message: jasirBoost
           ? 'j4s1r POWER-UP: 7 power cards dealt!'
           : effectiveDiff === 'no_mercy'
             ? 'NO MERCY MODE — 25+ cards = KO!'
-            : 'Shuffling and dealing...',
+            : `Shuffling & dealing (${effectiveCount} players)...`,
         roundId: nextRoundId,
       };
 
       setMode('solo');
       setScreen('PLAYING');
       syncSoloToView([
-        { kind: 'deal', isJasirBoost: dealt.jasirBoost, difficulty: effectiveDiff },
+        { kind: 'deal', isJasirBoost: jasirBoost, difficulty: effectiveDiff },
       ]);
 
       scheduleSolo(900, () => {
         const s = soloRef.current;
         if (!s || s.roundId !== nextRoundId) return;
         s.turn = 'host';
-        s.message = dealt.jasirBoost
+        s.turnIndex = 0;
+        s.message = jasirBoost
           ? 'j4s1r POWER-UP active — your turn!'
           : effectiveDiff === 'no_mercy'
             ? 'Your turn — stack draw cards or show No Mercy.'
@@ -523,110 +617,191 @@ export default function App() {
         ]);
       });
     },
-    [activeTheme.accent, clearSoloTimers, difficulty, playerName, scheduleSolo, syncSoloToView]
+    [
+      activeTheme.accent,
+      clearSoloTimers,
+      difficulty,
+      playerCount,
+      playerName,
+      scheduleSolo,
+      syncSoloToView,
+    ]
   );
+
+  const advanceSoloIndex = (s: SoloInternalState, steps = 1): number =>
+    getNextAliveSeatIndex(
+      s.seats.map((seat) => seat.eliminated),
+      s.turnIndex,
+      s.direction,
+      steps
+    );
+
+  const recycleSoloHand = (s: SoloInternalState, hand: Card[]) => {
+    if (hand.length === 0) return;
+    s.deck.unshift(...hand.splice(0, hand.length));
+  };
+
+  const triggerSoloMercyKo = (
+    s: SoloInternalState,
+    loserSeat: SoloSeat,
+    expectedRound: number,
+    baseEffects: EffectEvent[]
+  ): boolean => {
+    if (s.difficulty !== 'no_mercy' || loserSeat.hand.length < MERCY_HAND_LIMIT) {
+      return false;
+    }
+    loserSeat.eliminated = true;
+    recycleSoloHand(s, loserSeat.hand);
+    const alive = s.seats.filter((seat) => !seat.eliminated);
+    const isSelfLoser = loserSeat.index === 0;
+    const koEffects: EffectEvent[] = [
+      ...baseEffects,
+      { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser },
+    ];
+
+    if (alive.length <= 1 || isSelfLoser) {
+      const winnerSeat = isSelfLoser
+        ? alive[0] ?? s.seats[1]
+        : alive[0] ?? s.seats[0];
+      s.turn = 'busy';
+      s.message = `MERCY KO! ${loserSeat.name} reached 25+ cards!`;
+      syncSoloToView(koEffects);
+      scheduleSolo(900, () => {
+        const st = soloRef.current;
+        if (!st || st.roundId !== expectedRound) return;
+        winnerSeat.score += 1;
+        st.winner = winnerSeat.index === 0 ? 'host' : 'guest';
+        st.winnerIndex = winnerSeat.index;
+        st.winnerName = winnerSeat.name;
+        st.turn = 'over';
+        st.message = `${winnerSeat.name} wins by Mercy Rule KO!`;
+        if (winnerSeat.index === 0) {
+          const milestone = recordSelfWin(`solo-${expectedRound}`);
+          syncSoloToView([
+            {
+              kind: 'win',
+              winnerRole: 'host',
+              winnerIndex: 0,
+              winnerName: winnerSeat.name,
+              milestone,
+            },
+          ]);
+        } else {
+          setWinMilestone(null);
+          syncSoloToView([
+            {
+              kind: 'win',
+              winnerRole: 'guest',
+              winnerIndex: winnerSeat.index,
+              winnerName: winnerSeat.name,
+            },
+          ]);
+        }
+      });
+      return true;
+    }
+
+    const nextIdx = s.turnIndex === loserSeat.index ? advanceSoloIndex(s, 1) : s.turnIndex;
+    s.turn = 'busy';
+    s.message = `MERCY KO! ${loserSeat.name} knocked out!`;
+    syncSoloToView(koEffects);
+    scheduleSolo(900, () => {
+      const st = soloRef.current;
+      if (!st || st.roundId !== expectedRound || st.winner) return;
+      st.turnIndex = nextIdx;
+      const nextSeat = st.seats[nextIdx];
+      st.turn = nextIdx === 0 ? 'host' : 'guest';
+      st.message = `${nextSeat.name}'s turn (${st.currentColor}).`;
+      syncSoloToView();
+      if (nextSeat.isCpu) {
+        scheduleSolo(700, () => runCpuTurn(expectedRound));
+      }
+    });
+    return true;
+  };
 
   const runCpuTurn = useCallback(
     (expectedRound: number) => {
       const s = soloRef.current;
       if (!s || s.roundId !== expectedRound || s.turn !== 'guest' || s.winner) return;
+      const cpuSeat = s.seats[s.turnIndex];
+      if (!cpuSeat || !cpuSeat.isCpu || cpuSeat.eliminated) return;
 
+      const nextAliveIdx = advanceSoloIndex(s, 1);
+      const nextAliveCount = s.seats[nextAliveIdx]?.hand.length ?? 7;
       const top = s.discard[s.discard.length - 1];
       const chosen = chooseCpuCard(
-        s.cpuHand,
+        cpuSeat.hand,
         top,
         s.currentColor,
         s.difficulty,
         s.pendingDrawMin,
-        s.playerHand.length
+        nextAliveCount
       );
 
-      // Must take draw stack if cannot counter-stack
       if (s.pendingDrawStack > 0 && !chosen) {
         const stackCount = s.pendingDrawStack;
         const effs: EffectEvent[] = [];
         for (let i = 0; i < stackCount; i++) {
-          const res = drawOneFromDeck(s.deck, s.discard, s.cpuHand);
+          const res = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
           if (res.reshuffled) effs.push({ kind: 'reshuffle' });
         }
         s.pendingDrawStack = 0;
         s.pendingDrawMin = 0;
         soundFx.playDraw();
 
-        if (s.difficulty === 'no_mercy' && s.cpuHand.length >= MERCY_HAND_LIMIT) {
-          s.turn = 'busy';
-          s.message = `MERCY KO! CPU hit ${s.cpuHand.length} cards!`;
-          syncSoloToView([
-            ...effs,
-            { kind: 'mercy_ko', loserName: 'CPU', isSelfLoser: false },
-          ]);
-          scheduleSolo(800, () => {
-            const st = soloRef.current;
-            if (!st || st.roundId !== expectedRound) return;
-            st.winner = 'host';
-            st.turn = 'over';
-            st.score = { ...st.score, player: st.score.player + 1 };
-            st.message = 'You win by Mercy Rule KO!';
-            const milestone = recordSelfWin(`solo-${expectedRound}`);
-            syncSoloToView([{ kind: 'win', winnerRole: 'host', milestone }]);
-          });
-          return;
-        }
+        if (triggerSoloMercyKo(s, cpuSeat, expectedRound, effs)) return;
 
+        const nextIdx = advanceSoloIndex(s, 1);
+        const nextSeat = s.seats[nextIdx];
         s.turn = 'busy';
-        s.message = `CPU took +${stackCount} cards! Your turn.`;
+        s.message = `${cpuSeat.name} took +${stackCount} cards! ${nextSeat.name}'s turn.`;
         syncSoloToView(effs);
         scheduleSolo(750, () => {
           const st = soloRef.current;
           if (!st || st.roundId !== expectedRound || st.winner) return;
-          st.turn = 'host';
+          st.turnIndex = nextIdx;
+          st.turn = nextIdx === 0 ? 'host' : 'guest';
           syncSoloToView();
+          if (nextSeat.isCpu) {
+            scheduleSolo(650, () => runCpuTurn(expectedRound));
+          }
         });
         return;
       }
 
       if (!chosen) {
-        const { card, reshuffled } = drawOneFromDeck(s.deck, s.discard, s.cpuHand);
+        const { card, reshuffled } = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
         const effs: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
         soundFx.playDraw();
 
-        if (s.difficulty === 'no_mercy' && s.cpuHand.length >= MERCY_HAND_LIMIT) {
-          s.turn = 'busy';
-          s.message = `MERCY KO! CPU hit ${s.cpuHand.length} cards!`;
-          syncSoloToView([
-            ...effs,
-            { kind: 'mercy_ko', loserName: 'CPU', isSelfLoser: false },
-          ]);
-          scheduleSolo(800, () => {
-            const st = soloRef.current;
-            if (!st || st.roundId !== expectedRound) return;
-            st.winner = 'host';
-            st.turn = 'over';
-            st.score = { ...st.score, player: st.score.player + 1 };
-            st.message = 'You win by Mercy Rule KO!';
-            const milestone = recordSelfWin(`solo-${expectedRound}`);
-            syncSoloToView([{ kind: 'win', winnerRole: 'host', milestone }]);
-          });
-          return;
-        }
+        if (triggerSoloMercyKo(s, cpuSeat, expectedRound, effs)) return;
 
         if (card && canPlayCard(card, top, s.currentColor)) {
-          s.message = 'CPU drew a playable card...';
+          s.message = `${cpuSeat.name} drew a playable card...`;
           syncSoloToView(effs);
-          scheduleSolo(750, () => {
+          scheduleSolo(700, () => {
             const st = soloRef.current;
             if (!st || st.roundId !== expectedRound || st.winner) return;
             commitCpuCard(card, expectedRound);
           });
         } else {
+          const nextIdx = advanceSoloIndex(s, 1);
+          const nextSeat = s.seats[nextIdx];
           s.turn = 'busy';
-          s.message = card ? 'CPU drew a card. Your turn!' : 'Deck empty. Your turn!';
+          s.message = card
+            ? `${cpuSeat.name} drew a card. ${nextSeat.name}'s turn.`
+            : `Deck empty. ${nextSeat.name}'s turn.`;
           syncSoloToView(effs);
           scheduleSolo(650, () => {
             const st = soloRef.current;
             if (!st || st.roundId !== expectedRound || st.winner) return;
-            st.turn = 'host';
+            st.turnIndex = nextIdx;
+            st.turn = nextIdx === 0 ? 'host' : 'guest';
             syncSoloToView();
+            if (nextSeat.isCpu) {
+              scheduleSolo(650, () => runCpuTurn(expectedRound));
+            }
           });
         }
         return;
@@ -642,179 +817,209 @@ export default function App() {
     (card: Card, expectedRound: number) => {
       const s = soloRef.current;
       if (!s || s.roundId !== expectedRound || s.winner) return;
-      const idx = s.cpuHand.findIndex((c) => c.uid === card.uid);
+      const cpuSeat = s.seats[s.turnIndex];
+      if (!cpuSeat || !cpuSeat.isCpu) return;
+      const idx = cpuSeat.hand.findIndex((c) => c.uid === card.uid);
       if (idx === -1) return;
 
-      s.cpuHand.splice(idx, 1);
+      cpuSeat.hand.splice(idx, 1);
 
       const effects: EffectEvent[] = [];
       const nextColor: SuitColor =
-        card.color === 'Wild' ? chooseCpuWildColor(s.cpuHand, s.difficulty) : card.color;
+        card.color === 'Wild' ? chooseCpuWildColor(cpuSeat.hand, s.difficulty) : card.color;
 
       if (card.value === 'Dump' && card.color !== 'Wild') {
         const extras: Card[] = [];
-        for (let i = s.cpuHand.length - 1; i >= 0; i--) {
-          if (s.cpuHand[i].color === card.color) {
-            const [matched] = s.cpuHand.splice(i, 1);
-            extras.push(matched);
-          }
-        }
-        s.discard.push(...extras);
-        effects.push({ kind: 'dump', whoName: 'CPU', color: nextColor, count: extras.length + 1 });
-      }
-
-      s.discard.push(card);
-      s.currentColor = nextColor;
-      effects.push({ kind: 'impact', card, activeColor: nextColor });
-
-      if (s.cpuHand.length === 0) {
-        s.pendingDrawStack = 0;
-        s.pendingDrawMin = 0;
-        s.turn = 'busy';
-        s.message = 'CPU played its last card!';
-        syncSoloToView(effects);
-        scheduleSolo(700, () => {
-          const st = soloRef.current;
-          if (!st || st.roundId !== expectedRound) return;
-          st.winner = 'guest';
-          st.turn = 'over';
-          st.score = { ...st.score, cpu: st.score.cpu + 1 };
-          st.message = 'CPU wins this round.';
-          setWinMilestone(null);
-          syncSoloToView([{ kind: 'win', winnerRole: 'guest' }]);
-        });
-        return;
-      }
-
-      let cpuForgotUno = false;
-      if (s.cpuHand.length === 1) {
-        if (shouldCpuCallUno(s.difficulty)) {
-          effects.push({ kind: 'uno', whoName: 'CPU', isSelf: false });
-        } else {
-          cpuForgotUno = true;
-          for (let i = 0; i < 2; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, s.cpuHand);
-            if (res.reshuffled) effects.push({ kind: 'reshuffle' });
-          }
-          effects.push({ kind: 'uno_penalty', whoName: 'CPU', isSelf: false });
-        }
-      }
-
-      const drawAmount = getDrawAmount(card);
-      if (drawAmount > 0) {
-        if (s.difficulty === 'no_mercy') {
-          s.pendingDrawStack += drawAmount;
-          s.pendingDrawMin = drawAmount;
-          s.turn = 'busy';
-          s.message = `CPU stacked ${card.value}! Stack +${drawAmount}+ or take +${s.pendingDrawStack}.`;
-          syncSoloToView(effects);
-          scheduleSolo(750, () => {
-            const st = soloRef.current;
-            if (!st || st.roundId !== expectedRound || st.winner) return;
-            st.turn = 'host';
-            syncSoloToView();
-          });
-        } else {
-          s.turn = 'busy';
-          s.message = `CPU played ${card.value} — you draw ${drawAmount}!`;
-          for (let i = 0; i < drawAmount; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, s.playerHand);
-            if (res.reshuffled) effects.push({ kind: 'reshuffle' });
-          }
-          syncSoloToView(effects);
-          scheduleSolo(1100 + drawAmount * 110, () => {
-            const st = soloRef.current;
-            if (!st || st.roundId !== expectedRound || st.winner) return;
-            st.turn = 'guest';
-            st.message = `CPU goes again. Color is ${st.currentColor}.`;
-            syncSoloToView();
-            scheduleSolo(700, () => runCpuTurn(expectedRound));
-          });
-        }
-      } else if (card.value === 'Roulette') {
-        s.turn = 'busy';
-        const rRes = drawColorRoulette(s.deck, s.discard, s.playerHand, nextColor);
-        if (rRes.reshuffled) effects.push({ kind: 'reshuffle' });
-        effects.push({
-          kind: 'roulette',
-          whoName: playerName,
-          color: nextColor,
-          drawnCount: rRes.drawnCount,
-        });
-
-        if (s.difficulty === 'no_mercy' && s.playerHand.length >= MERCY_HAND_LIMIT) {
-          s.message = `MERCY KO! You reached ${s.playerHand.length} cards!`;
-          effects.push({ kind: 'mercy_ko', loserName: playerName, isSelfLoser: true });
-          syncSoloToView(effects);
-          scheduleSolo(950, () => {
-            const st = soloRef.current;
-            if (!st || st.roundId !== expectedRound) return;
-            st.winner = 'guest';
-            st.turn = 'over';
-            st.score = { ...st.score, cpu: st.score.cpu + 1 };
-            st.message = 'CPU wins by Mercy Rule KO!';
-            setWinMilestone(null);
-            syncSoloToView([{ kind: 'win', winnerRole: 'guest' }]);
-          });
-          return;
-        }
-
-        s.message = `Color Roulette (${nextColor}) — you drew ${rRes.drawnCount}! CPU goes again.`;
-        syncSoloToView(effects);
-        scheduleSolo(1200, () => runCpuTurn(expectedRound));
-      } else if (card.value === 'Skip' || card.value === 'Reverse' || card.value === 'Skip All') {
-        s.turn = 'guest';
-        s.message = cpuForgotUno
-          ? 'CPU forgot UNO (+2), but skipped you — goes again.'
-          : `CPU played ${card.value} — it goes again.`;
-        syncSoloToView(effects);
-        scheduleSolo(1150, () => runCpuTurn(expectedRound));
-      } else {
-        s.turn = 'busy';
-        s.message = cpuForgotUno
-          ? `CPU forgot to call UNO (+2)! Your turn — ${nextColor}.`
-          : s.cpuHand.length === 1
-            ? `CPU called UNO! Your turn — color is ${nextColor}.`
-            : `Your turn — color is ${nextColor}.`;
-        syncSoloToView(effects);
-        scheduleSolo(600, () => {
-          const st = soloRef.current;
-          if (!st || st.roundId !== expectedRound || st.winner) return;
-          st.turn = 'host';
-          syncSoloToView();
-        });
-      }
-    },
-    [playerName, runCpuTurn, scheduleSolo, syncSoloToView]
-  );
-
-  const commitSoloPlayerCard = useCallback(
-    (cardUid: number, chosenColor: SuitColor) => {
-      const s = soloRef.current;
-      if (!s || s.turn !== 'host' || s.winner) return;
-      const idx = s.playerHand.findIndex((c) => c.uid === cardUid);
-      if (idx === -1) return;
-
-      const card = s.playerHand[idx];
-      const expectedRound = s.roundId;
-      const wasUnoArmed = s.playerUnoArmed;
-      s.playerUnoArmed = false;
-
-      s.playerHand.splice(idx, 1);
-
-      const effects: EffectEvent[] = [];
-      if (card.value === 'Dump' && card.color !== 'Wild') {
-        const extras: Card[] = [];
-        for (let i = s.playerHand.length - 1; i >= 0; i--) {
-          if (s.playerHand[i].color === card.color) {
-            const [matched] = s.playerHand.splice(i, 1);
+        for (let i = cpuSeat.hand.length - 1; i >= 0; i--) {
+          if (cpuSeat.hand[i].color === card.color) {
+            const [matched] = cpuSeat.hand.splice(i, 1);
             extras.push(matched);
           }
         }
         s.discard.push(...extras);
         effects.push({
           kind: 'dump',
-          whoName: playerName,
+          whoName: cpuSeat.name,
+          color: nextColor,
+          count: extras.length + 1,
+        });
+      }
+
+      s.discard.push(card);
+      s.currentColor = nextColor;
+      effects.push({ kind: 'impact', card, activeColor: nextColor });
+
+      if (cpuSeat.hand.length === 0) {
+        s.pendingDrawStack = 0;
+        s.pendingDrawMin = 0;
+        s.turn = 'busy';
+        s.message = `${cpuSeat.name} played its last card!`;
+        syncSoloToView(effects);
+        scheduleSolo(700, () => {
+          const st = soloRef.current;
+          if (!st || st.roundId !== expectedRound) return;
+          cpuSeat.score += 1;
+          st.winner = 'guest';
+          st.winnerIndex = cpuSeat.index;
+          st.winnerName = cpuSeat.name;
+          st.turn = 'over';
+          st.message = `${cpuSeat.name} wins this round.`;
+          setWinMilestone(null);
+          syncSoloToView([
+            {
+              kind: 'win',
+              winnerRole: 'guest',
+              winnerIndex: cpuSeat.index,
+              winnerName: cpuSeat.name,
+            },
+          ]);
+        });
+        return;
+      }
+
+      let cpuForgotUno = false;
+      if (cpuSeat.hand.length === 1) {
+        if (shouldCpuCallUno(s.difficulty)) {
+          effects.push({ kind: 'uno', whoName: cpuSeat.name, isSelf: false });
+        } else {
+          cpuForgotUno = true;
+          for (let i = 0; i < 2; i++) {
+            const res = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
+            if (res.reshuffled) effects.push({ kind: 'reshuffle' });
+          }
+          effects.push({ kind: 'uno_penalty', whoName: cpuSeat.name, isSelf: false });
+        }
+      }
+
+      const scheduleNextTurn = (nextIdx: number, delayMs: number, nextMessage?: string) => {
+        s.turn = 'busy';
+        syncSoloToView(effects);
+        scheduleSolo(delayMs, () => {
+          const st = soloRef.current;
+          if (!st || st.roundId !== expectedRound || st.winner) return;
+          st.turnIndex = nextIdx;
+          const nextSeat = st.seats[nextIdx];
+          st.turn = nextIdx === 0 ? 'host' : 'guest';
+          if (nextMessage) st.message = nextMessage;
+          syncSoloToView();
+          if (nextSeat.isCpu) {
+            scheduleSolo(700, () => runCpuTurn(expectedRound));
+          }
+        });
+      };
+
+      const aliveCount = s.seats.filter((seat) => !seat.eliminated).length;
+      const drawAmount = getDrawAmount(card);
+
+      if (drawAmount > 0) {
+        if (s.difficulty === 'no_mercy') {
+          s.pendingDrawStack += drawAmount;
+          s.pendingDrawMin = drawAmount;
+          const nextIdx = advanceSoloIndex(s, 1);
+          const nextSeat = s.seats[nextIdx];
+          s.message = `${cpuSeat.name} stacked ${card.value}! ${nextSeat.name}: stack +${drawAmount}+ or take +${s.pendingDrawStack}.`;
+          scheduleNextTurn(nextIdx, 750);
+        } else {
+          const victimIdx = advanceSoloIndex(s, 1);
+          const victimSeat = s.seats[victimIdx];
+          for (let i = 0; i < drawAmount; i++) {
+            const res = drawOneFromDeck(s.deck, s.discard, victimSeat.hand);
+            if (res.reshuffled) effects.push({ kind: 'reshuffle' });
+          }
+          const nextIdx = advanceSoloIndex(s, 2);
+          const nextSeat = s.seats[nextIdx];
+          s.message = `${cpuSeat.name} played ${card.value} — ${victimSeat.name} draws ${drawAmount}!`;
+          scheduleNextTurn(
+            nextIdx,
+            950 + drawAmount * 80,
+            `${nextSeat.name}'s turn — color is ${nextColor}.`
+          );
+        }
+      } else if (card.value === 'Roulette') {
+        const victimIdx = advanceSoloIndex(s, 1);
+        const victimSeat = s.seats[victimIdx];
+        const rRes = drawColorRoulette(s.deck, s.discard, victimSeat.hand, nextColor);
+        if (rRes.reshuffled) effects.push({ kind: 'reshuffle' });
+        effects.push({
+          kind: 'roulette',
+          whoName: victimSeat.name,
+          color: nextColor,
+          drawnCount: rRes.drawnCount,
+        });
+
+        if (triggerSoloMercyKo(s, victimSeat, expectedRound, effects)) return;
+
+        const nextIdx = advanceSoloIndex(s, 2);
+        const nextSeat = s.seats[nextIdx];
+        s.message = `Color Roulette (${nextColor}) — ${victimSeat.name} drew ${rRes.drawnCount}!`;
+        scheduleNextTurn(nextIdx, 1100, `${nextSeat.name}'s turn — color is ${nextColor}.`);
+      } else if (card.value === 'Skip All') {
+        s.message = `${cpuSeat.name} played Skip All — goes again!`;
+        scheduleNextTurn(cpuSeat.index, 850);
+      } else if (card.value === 'Skip') {
+        const skippedSeat = s.seats[advanceSoloIndex(s, 1)];
+        const nextIdx = advanceSoloIndex(s, 2);
+        const nextSeat = s.seats[nextIdx];
+        s.message = cpuForgotUno
+          ? `${cpuSeat.name} forgot UNO (+2), skipped ${skippedSeat.name}!`
+          : `${cpuSeat.name} skipped ${skippedSeat.name} — ${nextSeat.name}'s turn.`;
+        scheduleNextTurn(nextIdx, 800);
+      } else if (card.value === 'Reverse') {
+        if (aliveCount <= 2) {
+          s.message = cpuForgotUno
+            ? `${cpuSeat.name} forgot UNO (+2), reversed back!`
+            : `${cpuSeat.name} reversed — goes again!`;
+          scheduleNextTurn(cpuSeat.index, 800);
+        } else {
+          s.direction = s.direction === 1 ? -1 : 1;
+          const nextIdx = advanceSoloIndex(s, 1);
+          const nextSeat = s.seats[nextIdx];
+          s.message = `${cpuSeat.name} reversed direction — ${nextSeat.name}'s turn!`;
+          scheduleNextTurn(nextIdx, 750);
+        }
+      } else {
+        const nextIdx = advanceSoloIndex(s, 1);
+        const nextSeat = s.seats[nextIdx];
+        s.message = cpuForgotUno
+          ? `${cpuSeat.name} forgot UNO (+2)! ${nextSeat.name}'s turn — ${nextColor}.`
+          : cpuSeat.hand.length === 1
+            ? `${cpuSeat.name} called UNO! ${nextSeat.name}'s turn — ${nextColor}.`
+            : `${nextSeat.name}'s turn — color is ${nextColor}.`;
+        scheduleNextTurn(nextIdx, 600);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [runCpuTurn, scheduleSolo, syncSoloToView]
+  );
+
+  const commitSoloPlayerCard = useCallback(
+    (cardUid: number, chosenColor: SuitColor) => {
+      const s = soloRef.current;
+      if (!s || s.turn !== 'host' || s.winner) return;
+      const selfSeat = s.seats[0];
+      const idx = selfSeat.hand.findIndex((c) => c.uid === cardUid);
+      if (idx === -1) return;
+
+      const card = selfSeat.hand[idx];
+      const expectedRound = s.roundId;
+      const wasUnoArmed = selfSeat.unoArmed;
+      selfSeat.unoArmed = false;
+
+      selfSeat.hand.splice(idx, 1);
+
+      const effects: EffectEvent[] = [];
+      if (card.value === 'Dump' && card.color !== 'Wild') {
+        const extras: Card[] = [];
+        for (let i = selfSeat.hand.length - 1; i >= 0; i--) {
+          if (selfSeat.hand[i].color === card.color) {
+            const [matched] = selfSeat.hand.splice(i, 1);
+            extras.push(matched);
+          }
+        }
+        s.discard.push(...extras);
+        effects.push({
+          kind: 'dump',
+          whoName: selfSeat.name,
           color: chosenColor,
           count: extras.length + 1,
         });
@@ -825,7 +1030,7 @@ export default function App() {
       s.drawnUid = null;
       effects.push({ kind: 'impact', card, activeColor: chosenColor });
 
-      if (s.playerHand.length === 0) {
+      if (selfSeat.hand.length === 0) {
         s.pendingDrawStack = 0;
         s.pendingDrawMin = 0;
         s.turn = 'busy';
@@ -834,116 +1039,151 @@ export default function App() {
         scheduleSolo(700, () => {
           const st = soloRef.current;
           if (!st || st.roundId !== expectedRound) return;
+          selfSeat.score += 1;
           st.winner = 'host';
+          st.winnerIndex = 0;
+          st.winnerName = selfSeat.name;
           st.turn = 'over';
-          st.score = { ...st.score, player: st.score.player + 1 };
           st.message = 'You win the round!';
           const milestone = recordSelfWin(`solo-${expectedRound}`);
-          syncSoloToView([{ kind: 'win', winnerRole: 'host', milestone }]);
+          syncSoloToView([
+            {
+              kind: 'win',
+              winnerRole: 'host',
+              winnerIndex: 0,
+              winnerName: selfSeat.name,
+              milestone,
+            },
+          ]);
         });
         return;
       }
 
       let penalizedUno = false;
-      if (s.playerHand.length === 1) {
+      if (selfSeat.hand.length === 1) {
         if (wasUnoArmed) {
-          effects.push({ kind: 'uno', whoName: playerName, isSelf: true });
+          effects.push({ kind: 'uno', whoName: selfSeat.name, isSelf: true });
         } else {
           penalizedUno = true;
           for (let i = 0; i < 2; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, s.playerHand);
+            const res = drawOneFromDeck(s.deck, s.discard, selfSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
-          effects.push({ kind: 'uno_penalty', whoName: playerName, isSelf: true });
+          effects.push({ kind: 'uno_penalty', whoName: selfSeat.name, isSelf: true });
         }
       }
 
+      const scheduleNextTurn = (nextIdx: number, delayMs: number, nextMessage?: string) => {
+        s.turn = 'busy';
+        syncSoloToView(effects);
+        scheduleSolo(delayMs, () => {
+          const st = soloRef.current;
+          if (!st || st.roundId !== expectedRound || st.winner) return;
+          st.turnIndex = nextIdx;
+          const nextSeat = st.seats[nextIdx];
+          st.turn = nextIdx === 0 ? 'host' : 'guest';
+          if (nextMessage) st.message = nextMessage;
+          syncSoloToView();
+          if (nextSeat.isCpu) {
+            scheduleSolo(750, () => runCpuTurn(expectedRound));
+          }
+        });
+      };
+
+      const aliveCount = s.seats.filter((seat) => !seat.eliminated).length;
       const drawAmount = getDrawAmount(card);
+
       if (drawAmount > 0) {
         if (s.difficulty === 'no_mercy') {
           s.pendingDrawStack += drawAmount;
           s.pendingDrawMin = drawAmount;
-          s.turn = 'guest';
+          const nextIdx = advanceSoloIndex(s, 1);
+          const nextSeat = s.seats[nextIdx];
           s.message = penalizedUno
-            ? `Forgot UNO (+2)! CPU faces +${s.pendingDrawStack} stack...`
-            : `You stacked ${card.value}! CPU faces +${s.pendingDrawStack}...`;
-          syncSoloToView(effects);
-          scheduleSolo(950, () => runCpuTurn(expectedRound));
+            ? `Forgot UNO (+2)! ${nextSeat.name} faces +${s.pendingDrawStack} stack...`
+            : `You stacked ${card.value}! ${nextSeat.name} faces +${s.pendingDrawStack}...`;
+          scheduleNextTurn(nextIdx, 800);
         } else {
-          s.turn = 'busy';
-          s.message = penalizedUno
-            ? `Forgot UNO (+2)! CPU also draws ${drawAmount}!`
-            : `CPU draws ${drawAmount} — play again!`;
+          const victimIdx = advanceSoloIndex(s, 1);
+          const victimSeat = s.seats[victimIdx];
           for (let i = 0; i < drawAmount; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, s.cpuHand);
+            const res = drawOneFromDeck(s.deck, s.discard, victimSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
-          syncSoloToView(effects);
-          scheduleSolo(1000 + drawAmount * 100, () => {
-            const st = soloRef.current;
-            if (!st || st.roundId !== expectedRound || st.winner) return;
-            st.turn = 'host';
-            st.message = 'Your turn again!';
-            syncSoloToView();
-          });
+          const nextIdx = advanceSoloIndex(s, 2);
+          const nextSeat = s.seats[nextIdx];
+          s.message = penalizedUno
+            ? `Forgot UNO (+2)! ${victimSeat.name} draws ${drawAmount}!`
+            : `${victimSeat.name} draws ${drawAmount}!`;
+          scheduleNextTurn(
+            nextIdx,
+            950 + drawAmount * 80,
+            nextIdx === 0 ? 'Your turn again!' : `${nextSeat.name}'s turn (${chosenColor}).`
+          );
         }
       } else if (card.value === 'Roulette') {
-        s.turn = 'busy';
-        const rRes = drawColorRoulette(s.deck, s.discard, s.cpuHand, chosenColor);
+        const victimIdx = advanceSoloIndex(s, 1);
+        const victimSeat = s.seats[victimIdx];
+        const rRes = drawColorRoulette(s.deck, s.discard, victimSeat.hand, chosenColor);
         if (rRes.reshuffled) effects.push({ kind: 'reshuffle' });
         effects.push({
           kind: 'roulette',
-          whoName: 'CPU',
+          whoName: victimSeat.name,
           color: chosenColor,
           drawnCount: rRes.drawnCount,
         });
 
-        if (s.difficulty === 'no_mercy' && s.cpuHand.length >= MERCY_HAND_LIMIT) {
-          s.message = `MERCY KO! CPU hit ${s.cpuHand.length} cards!`;
-          effects.push({ kind: 'mercy_ko', loserName: 'CPU', isSelfLoser: false });
-          syncSoloToView(effects);
-          scheduleSolo(950, () => {
-            const st = soloRef.current;
-            if (!st || st.roundId !== expectedRound) return;
-            st.winner = 'host';
-            st.turn = 'over';
-            st.score = { ...st.score, player: st.score.player + 1 };
-            st.message = 'You win by Mercy Rule KO!';
-            const milestone = recordSelfWin(`solo-${expectedRound}`);
-            syncSoloToView([{ kind: 'win', winnerRole: 'host', milestone }]);
-          });
-          return;
-        }
+        if (triggerSoloMercyKo(s, victimSeat, expectedRound, effects)) return;
 
-        s.message = `Color Roulette (${chosenColor}) — CPU drew ${rRes.drawnCount}! Play again.`;
-        syncSoloToView(effects);
-        scheduleSolo(1100, () => {
-          const st = soloRef.current;
-          if (!st || st.roundId !== expectedRound || st.winner) return;
-          st.turn = 'host';
-          syncSoloToView();
-        });
-      } else if (card.value === 'Skip' || card.value === 'Reverse' || card.value === 'Skip All') {
-        s.turn = 'busy';
+        const nextIdx = advanceSoloIndex(s, 2);
+        const nextSeat = s.seats[nextIdx];
+        s.message = `Color Roulette (${chosenColor}) — ${victimSeat.name} drew ${rRes.drawnCount}!`;
+        scheduleNextTurn(
+          nextIdx,
+          1050,
+          nextIdx === 0 ? 'Your turn again!' : `${nextSeat.name}'s turn (${chosenColor}).`
+        );
+      } else if (card.value === 'Skip All') {
+        s.message = penalizedUno ? 'Forgot UNO (+2)! Skip All — play again.' : 'Skip All — play again!';
+        scheduleNextTurn(0, 800, 'Your turn again!');
+      } else if (card.value === 'Skip') {
+        const skippedSeat = s.seats[advanceSoloIndex(s, 1)];
+        const nextIdx = advanceSoloIndex(s, 2);
+        const nextSeat = s.seats[nextIdx];
         s.message = penalizedUno
-          ? 'Forgot UNO (+2)! CPU skipped — play again.'
-          : 'CPU skipped — play again!';
-        syncSoloToView(effects);
-        scheduleSolo(900, () => {
-          const st = soloRef.current;
-          if (!st || st.roundId !== expectedRound || st.winner) return;
-          st.turn = 'host';
-          st.message = 'Your turn again!';
-          syncSoloToView();
-        });
+          ? `Forgot UNO (+2)! ${skippedSeat.name} skipped.`
+          : `${skippedSeat.name} skipped!`;
+        scheduleNextTurn(
+          nextIdx,
+          800,
+          nextIdx === 0 ? 'Your turn again!' : `${nextSeat.name}'s turn (${chosenColor}).`
+        );
+      } else if (card.value === 'Reverse') {
+        if (aliveCount <= 2) {
+          s.message = penalizedUno
+            ? 'Forgot UNO (+2)! Reversed back — play again.'
+            : 'Reversed — play again!';
+          scheduleNextTurn(0, 800, 'Your turn again!');
+        } else {
+          s.direction = s.direction === 1 ? -1 : 1;
+          const nextIdx = advanceSoloIndex(s, 1);
+          const nextSeat = s.seats[nextIdx];
+          s.message = penalizedUno
+            ? `Forgot UNO (+2)! Direction reversed — ${nextSeat.name}'s turn.`
+            : `Direction reversed — ${nextSeat.name}'s turn.`;
+          scheduleNextTurn(nextIdx, 750);
+        }
       } else {
-        s.turn = 'guest';
-        s.message = penalizedUno ? 'Forgot UNO! +2 penalty cards.' : 'CPU is thinking...';
-        syncSoloToView(effects);
-        scheduleSolo(950, () => runCpuTurn(expectedRound));
+        const nextIdx = advanceSoloIndex(s, 1);
+        const nextSeat = s.seats[nextIdx];
+        s.message = penalizedUno
+          ? `Forgot UNO! +2 penalty cards. ${nextSeat.name}'s turn.`
+          : `${nextSeat.name} is thinking...`;
+        scheduleNextTurn(nextIdx, 750);
       }
     },
-    [playerName, recordSelfWin, runCpuTurn, scheduleSolo, syncSoloToView]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [recordSelfWin, runCpuTurn, scheduleSolo, syncSoloToView]
   );
 
   const sendWsAction = useCallback((action: ClientWsAction) => {
@@ -954,14 +1194,15 @@ export default function App() {
   }, []);
 
   const connectMultiplayer = useCallback(
-    (targetRoomId: string, targetToken: string, joinName: string) => {
+    (targetRoomId: string, targetToken: string, joinName: string, retryCount = 0) => {
       if (reconnectTimerRef.current) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
       if (wsRef.current) {
-        wsRef.current.close();
+        const oldWs = wsRef.current;
         wsRef.current = null;
+        oldWs.close();
       }
 
       const clientId = getOrCreateClientId(targetRoomId);
@@ -969,8 +1210,10 @@ export default function App() {
       const wsUrl = `${proto}//${window.location.host}/ws`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
+      let opened = false;
 
       ws.addEventListener('open', () => {
+        opened = true;
         setNetworkError(null);
         ws.send(
           JSON.stringify({
@@ -1004,9 +1247,10 @@ export default function App() {
           if (msg.view.turn !== 'over') {
             setWinMilestone(null);
           }
-          if (msg.view.opponentConnected && showQrModal) {
+          if (prevWaitingRef.current && msg.view.turn !== 'waiting') {
             setShowQrModal(false);
           }
+          prevWaitingRef.current = msg.view.turn === 'waiting';
           const enrichedEffects = msg.effects.map((eff) => {
             if (eff.kind === 'win' && eff.winnerRole === msg.view.selfRole) {
               const milestone = recordSelfWin(`mp-${msg.view.roomId}-${msg.view.roundId}`);
@@ -1023,23 +1267,41 @@ export default function App() {
       });
 
       ws.addEventListener('close', () => {
-        if (wsRef.current === ws) {
-          reconnectTimerRef.current = window.setTimeout(() => {
-            if (mode === 'multiplayer' && roomId === targetRoomId && roomToken === targetToken) {
-              connectMultiplayer(targetRoomId, targetToken, joinName);
-            }
-          }, 1500);
+        if (wsRef.current !== ws) return;
+        const shouldReconnect =
+          modeRef.current === 'multiplayer' &&
+          roomIdRef.current === targetRoomId &&
+          roomTokenRef.current === targetToken;
+        if (!shouldReconnect) return;
+
+        if (!opened && retryCount >= 2) {
+          setNetworkError('Live multiplayer server is unavailable here. Use Solo vs CPU instead.');
+          return;
         }
+
+        reconnectTimerRef.current = window.setTimeout(() => {
+          if (
+            modeRef.current === 'multiplayer' &&
+            roomIdRef.current === targetRoomId &&
+            roomTokenRef.current === targetToken
+          ) {
+            connectMultiplayer(targetRoomId, targetToken, joinName, opened ? 0 : retryCount + 1);
+          }
+        }, 1500);
       });
     },
-    [mode, playSoundForEffects, recordSelfWin, roomId, roomToken, showQrModal]
+    [playSoundForEffects, recordSelfWin]
   );
 
   useEffect(() => {
     return () => {
       clearSoloTimers();
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        const oldWs = wsRef.current;
+        wsRef.current = null;
+        oldWs.close();
+      }
     };
   }, [clearSoloTimers]);
 
@@ -1058,10 +1320,17 @@ export default function App() {
       const res = await fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hostName: cleanName, difficulty }),
+        body: JSON.stringify({ hostName: cleanName, difficulty, playerCount }),
       });
+      if (res.status === 404 || res.status === 405) {
+        throw new Error('Multiplayer QR rooms require the Node server. Solo vs CPU works everywhere!');
+      }
       if (!res.ok) throw new Error('Could not create multiplayer room.');
       const data = (await res.json()) as { roomId: string; token: string };
+      modeRef.current = 'multiplayer';
+      roomIdRef.current = data.roomId;
+      roomTokenRef.current = data.token;
+      prevWaitingRef.current = true;
       setRoomId(data.roomId);
       setRoomToken(data.token);
       setMode('multiplayer');
@@ -1076,13 +1345,17 @@ export default function App() {
 
   const handleJoinInvite = () => {
     if (!inviteRoomParam || !inviteTokenParam) return;
-    const cleanName = nameDraft.trim() || 'Player 2';
+    const cleanName = nameDraft.trim() || 'Player';
     setPlayerName(cleanName);
     try {
       localStorage.setItem('puno-player-name', cleanName);
     } catch {
       // ignore
     }
+    modeRef.current = 'multiplayer';
+    roomIdRef.current = inviteRoomParam;
+    roomTokenRef.current = inviteTokenParam;
+    prevWaitingRef.current = true;
     setMode('multiplayer');
     setRoomId(inviteRoomParam);
     setRoomToken(inviteTokenParam);
@@ -1100,11 +1373,13 @@ export default function App() {
     }
 
     const s = soloRef.current;
-    if (!s || s.turn !== 'host' || s.playerUnoArmed) return;
-    s.playerUnoArmed = true;
+    if (!s || s.turn !== 'host') return;
+    const selfSeat = s.seats[0];
+    if (selfSeat.unoArmed) return;
+    selfSeat.unoArmed = true;
     s.message = 'UNO armed! Play your card.';
-    syncSoloToView([{ kind: 'uno', whoName: playerName, isSelf: true }]);
-  }, [activeView, mode, pendingWildUid, playerName, sendWsAction, syncSoloToView]);
+    syncSoloToView([{ kind: 'uno', whoName: selfSeat.name, isSelf: true }]);
+  }, [activeView, mode, pendingWildUid, sendWsAction, syncSoloToView]);
 
   const handleDrawOrPass = useCallback(() => {
     const view = activeView;
@@ -1122,14 +1397,15 @@ export default function App() {
 
     const s = soloRef.current;
     if (!s || s.turn !== 'host') return;
+    const selfSeat = s.seats[0];
     const expectedRound = s.roundId;
-    s.playerUnoArmed = false;
+    selfSeat.unoArmed = false;
 
     if (s.pendingDrawStack > 0) {
       const stackCount = s.pendingDrawStack;
       const effs: EffectEvent[] = [];
       for (let i = 0; i < stackCount; i++) {
-        const res = drawOneFromDeck(s.deck, s.discard, s.playerHand);
+        const res = drawOneFromDeck(s.deck, s.discard, selfSeat.hand);
         if (res.reshuffled) effs.push({ kind: 'reshuffle' });
       }
       s.pendingDrawStack = 0;
@@ -1137,71 +1413,50 @@ export default function App() {
       s.drawnUid = null;
       soundFx.playDraw();
 
-      if (s.difficulty === 'no_mercy' && s.playerHand.length >= MERCY_HAND_LIMIT) {
-        s.turn = 'busy';
-        s.message = `MERCY KO! You reached ${s.playerHand.length} cards!`;
-        syncSoloToView([
-          ...effs,
-          { kind: 'mercy_ko', loserName: playerName, isSelfLoser: true },
-        ]);
-        scheduleSolo(950, () => {
-          const st = soloRef.current;
-          if (!st || st.roundId !== expectedRound) return;
-          st.winner = 'guest';
-          st.turn = 'over';
-          st.score = { ...st.score, cpu: st.score.cpu + 1 };
-          st.message = 'CPU wins by Mercy Rule KO!';
-          setWinMilestone(null);
-          syncSoloToView([{ kind: 'win', winnerRole: 'guest' }]);
-        });
-        return;
-      }
+      if (triggerSoloMercyKo(s, selfSeat, expectedRound, effs)) return;
 
-      s.turn = 'guest';
-      s.message = `You took +${stackCount} cards. CPU's turn.`;
+      const nextIdx = advanceSoloIndex(s, 1);
+      const nextSeat = s.seats[nextIdx];
+      s.turnIndex = nextIdx;
+      s.turn = nextIdx === 0 ? 'host' : 'guest';
+      s.message = `You took +${stackCount} cards. ${nextSeat.name}'s turn.`;
       syncSoloToView(effs);
-      scheduleSolo(850, () => runCpuTurn(expectedRound));
+      if (nextSeat.isCpu) {
+        scheduleSolo(850, () => runCpuTurn(expectedRound));
+      }
       return;
     }
 
     if (s.drawnUid !== null) {
       s.drawnUid = null;
-      s.turn = 'guest';
-      s.message = "You passed. CPU's turn.";
+      const nextIdx = advanceSoloIndex(s, 1);
+      const nextSeat = s.seats[nextIdx];
+      s.turnIndex = nextIdx;
+      s.turn = nextIdx === 0 ? 'host' : 'guest';
+      s.message = `You passed. ${nextSeat.name}'s turn.`;
       syncSoloToView();
-      scheduleSolo(850, () => runCpuTurn(expectedRound));
+      if (nextSeat.isCpu) {
+        scheduleSolo(850, () => runCpuTurn(expectedRound));
+      }
       return;
     }
 
-    const { card, reshuffled } = drawOneFromDeck(s.deck, s.discard, s.playerHand);
+    const { card, reshuffled } = drawOneFromDeck(s.deck, s.discard, selfSeat.hand);
     const effects: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
     soundFx.playDraw();
 
-    if (s.difficulty === 'no_mercy' && s.playerHand.length >= MERCY_HAND_LIMIT) {
-      s.turn = 'busy';
-      s.message = `MERCY KO! You reached ${s.playerHand.length} cards!`;
-      syncSoloToView([
-        ...effects,
-        { kind: 'mercy_ko', loserName: playerName, isSelfLoser: true },
-      ]);
-      scheduleSolo(950, () => {
-        const st = soloRef.current;
-        if (!st || st.roundId !== expectedRound) return;
-        st.winner = 'guest';
-        st.turn = 'over';
-        st.score = { ...st.score, cpu: st.score.cpu + 1 };
-        st.message = 'CPU wins by Mercy Rule KO!';
-        setWinMilestone(null);
-        syncSoloToView([{ kind: 'win', winnerRole: 'guest' }]);
-      });
-      return;
-    }
+    if (triggerSoloMercyKo(s, selfSeat, expectedRound, effects)) return;
 
     if (!card) {
-      s.turn = 'guest';
-      s.message = 'No cards left to draw — turn passes.';
+      const nextIdx = advanceSoloIndex(s, 1);
+      const nextSeat = s.seats[nextIdx];
+      s.turnIndex = nextIdx;
+      s.turn = nextIdx === 0 ? 'host' : 'guest';
+      s.message = `No cards left to draw — ${nextSeat.name}'s turn.`;
       syncSoloToView(effects);
-      scheduleSolo(850, () => runCpuTurn(expectedRound));
+      if (nextSeat.isCpu) {
+        scheduleSolo(850, () => runCpuTurn(expectedRound));
+      }
       return;
     }
 
@@ -1211,7 +1466,7 @@ export default function App() {
       ? 'You drew a playable card — play it or pass.'
       : 'No match — pass your turn.';
     syncSoloToView(effects);
-  }, [activeView, mode, pendingWildUid, playerName, runCpuTurn, scheduleSolo, sendWsAction, syncSoloToView]);
+  }, [activeView, mode, pendingWildUid, runCpuTurn, scheduleSolo, sendWsAction, syncSoloToView]);
 
   const handleCardPlay = useCallback(
     (uid: number) => {
@@ -1277,9 +1532,9 @@ export default function App() {
     if (mode === 'multiplayer') {
       sendWsAction({ type: 'restart', difficulty });
     } else {
-      startSoloRound(playerName, true, difficulty);
+      startSoloRound(playerName, true, difficulty, playerCount);
     }
-  }, [difficulty, mode, playerName, sendWsAction, startSoloRound]);
+  }, [difficulty, mode, playerCount, playerName, sendWsAction, startSoloRound]);
 
   useEffect(() => {
     if (screen === 'TITLE_MENU') {
@@ -1412,6 +1667,9 @@ export default function App() {
     if (mode === 'multiplayer') {
       sendWsAction({ type: 'rename', name: cleaned });
     } else if (screen !== 'TITLE_MENU') {
+      if (soloRef.current) {
+        soloRef.current.seats[0].name = cleaned;
+      }
       if (cleaned.toLowerCase() === 'j4s1r' && playerName.toLowerCase() !== 'j4s1r') {
         startSoloRound(cleaned, true);
       } else if (soloRef.current) {
@@ -1431,7 +1689,7 @@ export default function App() {
 
   const inviteUrl = useMemo(() => {
     if (!roomId || !roomToken) return '';
-    return `${window.location.origin}/?room=${encodeURIComponent(roomId)}&token=${encodeURIComponent(roomToken)}`;
+    return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomId)}&token=${encodeURIComponent(roomToken)}`;
   }, [roomId, roomToken]);
 
   const isMyTurn = Boolean(activeView && activeView.turn === activeView.selfRole);
@@ -1454,17 +1712,24 @@ export default function App() {
           onClick={() => {
             if (screen !== 'TITLE_MENU') {
               clearSoloTimers();
-              if (wsRef.current) {
-                wsRef.current.close();
-                wsRef.current = null;
+              if (reconnectTimerRef.current) {
+                window.clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = null;
               }
+              if (wsRef.current) {
+                const oldWs = wsRef.current;
+                wsRef.current = null;
+                oldWs.close();
+              }
+              modeRef.current = 'solo';
+              setMode('solo');
               setScreen('TITLE_MENU');
             }
           }}
-          className="font-display text-xl sm:text-2xl font-extrabold italic tracking-tight whitespace-nowrap shrink-0 hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-white rounded"
-          style={{ color: activeTheme.accent }}
+          className="whitespace-nowrap shrink-0 hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-white rounded"
+          aria-label="PUNO Home"
         >
-          PUNO
+          <PunoLogo theme={activeTheme} size="sm" />
         </button>
 
         {activeView && screen !== 'TITLE_MENU' ? (
@@ -1472,16 +1737,30 @@ export default function App() {
             <span className="text-[#f4f4ed] font-semibold truncate max-w-[120px]">
               {activeView.selfName}
             </span>
-            <span className="text-base font-bold" style={{ color: activeTheme.accent }}>
-              {activeView.score.self} : {activeView.score.opponent}
-            </span>
-            <span className="text-[#f4f4ed] font-semibold truncate max-w-[120px]">
-              {activeView.opponentName}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>{activeView.selfHand.length} in hand</span>
-            <span aria-hidden="true">·</span>
-            <span>{activeView.opponentCount} opponent</span>
+            {activeView.playerCount === 2 ? (
+              <>
+                <span className="text-base font-bold" style={{ color: activeTheme.accent }}>
+                  {activeView.score.self} : {activeView.score.opponent}
+                </span>
+                <span className="text-[#f4f4ed] font-semibold truncate max-w-[120px]">
+                  {activeView.opponentName}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>{activeView.selfHand.length} in hand</span>
+                <span aria-hidden="true">·</span>
+                <span>{activeView.opponentCount} opponent</span>
+              </>
+            ) : (
+              <>
+                <span className="text-base font-bold" style={{ color: activeTheme.accent }}>
+                  {activeView.score.self} {activeView.score.self === 1 ? 'win' : 'wins'}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>{activeView.playerCount} Players</span>
+                <span aria-hidden="true">·</span>
+                <span>{activeView.selfHand.length} in hand</span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span
               className="font-semibold"
@@ -1495,26 +1774,31 @@ export default function App() {
             </span>
           </div>
         ) : (
-          <div className="hidden md:flex items-center gap-3 text-xs text-[#9fb3b0] whitespace-nowrap">
-            <span>{activeTheme.label}</span>
-          </div>
+          careerWins > 0 && (
+            <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono-tabular text-[#9fb3b0] whitespace-nowrap">
+              <Trophy className="w-3.5 h-3.5" style={{ color: activeTheme.accent }} />
+              <span>{careerWins} {careerWins === 1 ? 'win' : 'wins'}</span>
+            </div>
+          )
         )}
 
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={cycleTheme}
-            className="h-10 inline-flex items-center gap-1.5 px-3 rounded-xl text-xs sm:text-sm font-semibold text-[#d6e2e0] border transition-colors whitespace-nowrap shrink-0 hover:text-white focus-visible:outline-2 focus-visible:outline-white"
-            style={{
-              backgroundColor: activeTheme.surface,
-              borderColor: activeTheme.surfaceBorder,
-            }}
-            title={`Theme: ${activeTheme.label}`}
-            aria-label={`Switch theme, current ${activeTheme.label}`}
-          >
-            <Palette className="w-4 h-4" style={{ color: activeTheme.accent }} />
-            <span className="hidden lg:inline">{activeTheme.label}</span>
-          </button>
+          {screen !== 'TITLE_MENU' && (
+            <button
+              type="button"
+              onClick={cycleTheme}
+              className="h-10 inline-flex items-center gap-1.5 px-3 rounded-xl text-xs sm:text-sm font-semibold text-[#d6e2e0] border transition-colors whitespace-nowrap shrink-0 hover:text-white focus-visible:outline-2 focus-visible:outline-white"
+              style={{
+                backgroundColor: activeTheme.surface,
+                borderColor: activeTheme.surfaceBorder,
+              }}
+              title={`Theme: ${activeTheme.label}`}
+              aria-label={`Switch theme, current ${activeTheme.label}`}
+            >
+              <Palette className="w-4 h-4" style={{ color: activeTheme.accent }} />
+              <span className="hidden lg:inline">{activeTheme.label}</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -1580,18 +1864,27 @@ export default function App() {
       {/* Main Stage */}
       <main className="relative flex-1 min-h-0 flex flex-col">
         {screen === 'TITLE_MENU' ? (
-          <div
-            className="flex-1 flex items-center justify-center p-4 sm:p-8 overflow-y-auto transition-all duration-500"
-            style={{
-              background: `radial-gradient(ellipse at 50% 35%, ${activeTheme.feltMid} 0%, ${activeTheme.bgMid} 58%, ${activeTheme.bgTop} 100%)`,
-            }}
-          >
-            <div className="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
-              {/* Left Animated Card Fan Preview (reflects chosen theme's card design) */}
-              <div className="hidden lg:flex lg:col-span-5 items-center justify-center py-8">
-                <div className="relative w-72 h-72 flex items-center justify-center">
+          <div className="relative flex-1 flex items-center justify-center px-4 py-6 sm:p-8 overflow-y-auto overflow-x-hidden">
+            <HomeBackdrop theme={activeTheme} />
+            <div className="relative z-10 w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
+              {/* Left Brand & Animated Card Fan */}
+              <div className="hidden lg:flex lg:col-span-5 flex-col items-center text-center">
+                <PunoLogo theme={activeTheme} size="lg" />
+                <p className="mt-3 text-sm text-[#c7d4d2]">
+                  {isGuestInvite
+                    ? `Invited to Room ${inviteRoomParam}`
+                    : '2 to 10 players · Solo or QR Room'}
+                </p>
+
+                <div className="relative w-72 h-72 mt-4 flex items-center justify-center">
                   <motion.div
-                    animate={{ scale: [1, 1.03, 1], opacity: [0.85, 1, 0.85] }}
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 36, repeat: Infinity, ease: 'linear' }}
+                    className="absolute inset-1 rounded-full border border-dashed opacity-45"
+                    style={{ borderColor: activeTheme.accent }}
+                  />
+                  <motion.div
+                    animate={{ scale: [1, 1.03, 1], opacity: [0.88, 1, 0.88] }}
                     transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
                     className="absolute inset-4 rounded-full border-2 shadow-2xl"
                     style={{
@@ -1643,231 +1936,243 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Right Minimal Setup Card */}
-              <motion.div
-                initial={{ opacity: 0, y: 18 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-                className="lg:col-span-7 w-full rounded-2xl p-6 sm:p-8 shadow-2xl border backdrop-blur-md"
-                style={{
-                  backgroundColor: `${activeTheme.surface}eb`,
-                  borderColor: activeTheme.surfaceBorder,
-                }}
-              >
-                <div className="mb-5">
-                  <h1
-                    className="font-display text-5xl sm:text-6xl font-extrabold italic tracking-tight mb-1"
-                    style={{ color: activeTheme.accent }}
-                  >
-                    PUNO
-                  </h1>
-                  {isGuestInvite && (
-                    <p className="text-sm text-[#c7d4d2]">
-                      Room {inviteRoomParam} invite
-                    </p>
-                  )}
+              {/* Right Clean Setup Card */}
+              <div className="lg:col-span-7 w-full max-w-md mx-auto lg:max-w-none">
+                <div className="lg:hidden flex flex-col items-center text-center mb-5">
+                  <PunoLogo theme={activeTheme} size="md" />
+                  <p className="mt-2.5 text-xs text-[#c7d4d2]">
+                    {isGuestInvite
+                      ? `Room ${inviteRoomParam} invite`
+                      : '2 to 10 players · Solo or QR Room'}
+                  </p>
                 </div>
 
-                {/* Theme Swatches */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mb-5">
-                  {THEME_LIST.map((t, idx) => {
-                    const selected = t.id === themeId;
-                    return (
-                      <motion.button
-                        key={t.id}
-                        type="button"
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: idx * 0.04, duration: 0.25 }}
-                        whileHover={{ y: -2, scale: 1.02 }}
-                        whileTap={{ scale: 0.97 }}
-                        onClick={() => selectTheme(t.id)}
-                        className={`flex items-center gap-2 rounded-xl h-11 px-3 border transition-colors focus-visible:outline-2 focus-visible:outline-white ${
-                          selected ? 'shadow-md' : 'opacity-75 hover:opacity-100'
-                        }`}
-                        style={{
-                          backgroundColor: t.bgMid,
-                          borderColor: selected ? t.accent : t.surfaceBorder,
-                        }}
-                      >
-                        <span
-                          className="w-3.5 h-3.5 rounded-full border shrink-0"
-                          style={{
-                            backgroundColor: t.feltCenter,
-                            borderColor: t.railTrim,
-                          }}
-                        />
-                        <span className="text-xs font-bold text-[#f4f4ed] truncate">
-                          {t.label}
-                        </span>
-                      </motion.button>
-                    );
-                  })}
-                </div>
-
-                {/* Difficulty Meter */}
-                {!isGuestInvite && (
-                  <div className="mb-5">
-                    <div className="flex items-center justify-between text-xs mb-2">
-                      <span className="font-semibold text-[#9fb3b0]">Difficulty Meter</span>
-                      <span
-                        className="font-bold flex items-center gap-1.5"
-                        style={{ color: activeDifficulty.accent }}
-                      >
-                        {difficulty === 'no_mercy' && <Skull className="w-3.5 h-3.5" />}
-                        <span>
-                          {activeDifficulty.label} · {activeDifficulty.tier}
-                        </span>
-                      </span>
-                    </div>
-
-                    <div
-                      className="grid grid-cols-4 gap-1.5 p-1 rounded-xl border bg-black/25"
+                <motion.div
+                  initial={{ opacity: 0, y: 16 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  className="w-full rounded-2xl p-6 sm:p-7 shadow-2xl border backdrop-blur-md space-y-5"
+                  style={{
+                    backgroundColor: `${activeTheme.surface}e8`,
+                    borderColor: activeTheme.surfaceBorder,
+                  }}
+                >
+                  {/* Display Name */}
+                  <div className="relative">
+                    <User className="w-4 h-4 text-[#8ea5a2] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="player-name-input"
+                      aria-label="Your display name"
+                      type="text"
+                      maxLength={18}
+                      value={nameDraft}
+                      onChange={(e) => setNameDraft(e.target.value)}
+                      placeholder="Your name"
+                      className="w-full h-11 pl-10 pr-4 rounded-xl bg-black/25 border text-[#f4f4ed] text-sm font-medium placeholder:text-[#7e9491] focus:outline-none focus:border-white/40 transition-colors"
                       style={{ borderColor: activeTheme.surfaceBorder }}
-                      role="radiogroup"
-                      aria-label="Difficulty level"
-                    >
-                      {DIFFICULTY_LIST.map((d) => {
-                        const selected = d.id === difficulty;
+                    />
+                  </div>
+
+                  {/* Table Theme (Single Clean Dot Row) */}
+                  <div className="flex items-center justify-between gap-4 py-1">
+                    <div className="text-xs">
+                      <span className="text-[#9fb3b0] font-medium">Table</span>
+                      <span className="mx-1.5 text-[#5b716e]">·</span>
+                      <span className="font-semibold text-[#f4f4ed]">{activeTheme.label}</span>
+                    </div>
+                    <div className="flex items-center gap-2" role="radiogroup" aria-label="Table theme">
+                      {THEME_LIST.map((t) => {
+                        const selected = t.id === themeId;
                         return (
                           <button
-                            key={d.id}
+                            key={t.id}
                             type="button"
                             role="radio"
                             aria-checked={selected}
-                            onClick={() => selectDifficulty(d.id)}
-                            className={`relative h-10 rounded-lg text-xs font-bold transition-all whitespace-nowrap px-2 focus-visible:outline-2 focus-visible:outline-white ${
-                              selected ? 'text-[#10141e] shadow-sm' : 'text-[#c7d4d2] hover:text-white'
+                            aria-label={t.label}
+                            title={t.label}
+                            onClick={() => selectTheme(t.id)}
+                            className={`w-6 h-6 rounded-full border-2 transition-transform focus-visible:outline-2 focus-visible:outline-white ${
+                              selected ? 'scale-110 shadow-md' : 'opacity-70 hover:opacity-100 hover:scale-105'
                             }`}
-                            style={
-                              selected
-                                ? { backgroundColor: d.accent }
-                                : { backgroundColor: 'transparent' }
-                            }
-                          >
-                            {d.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {/* Visual 4-bar meter track */}
-                    <div className="grid grid-cols-4 gap-1.5 mt-2" aria-hidden="true">
-                      {DIFFICULTY_LIST.map((d) => {
-                        const filled = d.level <= activeDifficulty.level;
-                        return (
-                          <div
-                            key={d.id}
-                            className="h-1.5 rounded-full transition-all duration-300"
                             style={{
-                              backgroundColor: filled
-                                ? activeDifficulty.accent
-                                : 'rgba(255,255,255,0.1)',
-                              boxShadow:
-                                filled && difficulty === 'no_mercy'
-                                  ? `0 0 10px ${activeDifficulty.accent}99`
-                                  : undefined,
+                              backgroundColor: t.feltCenter,
+                              borderColor: selected ? t.accent : t.railTrim,
+                              boxShadow: selected ? `0 0 0 2px ${t.accent}44` : undefined,
                             }}
                           />
                         );
                       })}
                     </div>
-
-                    <p className="mt-2 text-xs text-[#b8cac8] leading-snug">
-                      {activeDifficulty.summary}
-                    </p>
                   </div>
-                )}
 
-                {/* Display Name */}
-                <div className="mb-5">
-                  <input
-                    id="player-name-input"
-                    aria-label="Your display name"
-                    type="text"
-                    maxLength={18}
-                    value={nameDraft}
-                    onChange={(e) => setNameDraft(e.target.value)}
-                    placeholder="Your name"
-                    className="w-full h-11 px-4 rounded-xl bg-black/30 border text-[#f4f4ed] text-sm focus:outline-none transition-colors"
-                    style={{ borderColor: activeTheme.surfaceBorder }}
-                  />
-                </div>
+                  {/* Player Count Slider (2-10 Players) */}
+                  {!isGuestInvite && (() => {
+                    const sliderPct = ((playerCount - MIN_PLAYERS) / (MAX_PLAYERS - MIN_PLAYERS)) * 100;
+                    return (
+                      <div className="pt-1 border-t" style={{ borderColor: `${activeTheme.surfaceBorder}99` }}>
+                        <div className="flex items-center justify-between text-xs pt-4 mb-2.5">
+                          <label htmlFor="player-count-slider" className="font-medium text-[#9fb3b0]">
+                            Players
+                          </label>
+                          <span
+                            className="font-bold font-mono-tabular"
+                            style={{ color: activeTheme.accent }}
+                          >
+                            {playerCount} {playerCount === 2 ? '· 1v1' : `· You + ${playerCount - 1}`}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="text-[11px] font-mono-tabular text-[#809794] w-3 text-center">
+                            {MIN_PLAYERS}
+                          </span>
+                          <input
+                            id="player-count-slider"
+                            type="range"
+                            min={MIN_PLAYERS}
+                            max={MAX_PLAYERS}
+                            step={1}
+                            value={playerCount}
+                            onChange={(e) => selectPlayerCount(Number(e.target.value))}
+                            aria-label="Number of players from 2 to 10"
+                            className="puno-slider flex-1 cursor-pointer"
+                            style={
+                              {
+                                '--slider-accent': activeTheme.accent,
+                                background: `linear-gradient(to right, ${activeTheme.accent} 0%, ${activeTheme.accent} ${sliderPct}%, rgba(255,255,255,0.14) ${sliderPct}%, rgba(255,255,255,0.14) 100%)`,
+                              } as CSSProperties
+                            }
+                          />
+                          <span className="text-[11px] font-mono-tabular text-[#809794] w-4 text-center">
+                            {MAX_PLAYERS}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
-                {networkError && (
-                  <div className="mb-5 rounded-xl bg-[#ee3f4f]/15 border border-[#ee3f4f]/50 px-4 py-3 text-sm text-[#ffb4bc]">
-                    {networkError}
-                  </div>
-                )}
+                  {/* Difficulty Segmented Control */}
+                  {!isGuestInvite && (
+                    <div className="pt-1 border-t" style={{ borderColor: `${activeTheme.surfaceBorder}99` }}>
+                      <div className="flex items-center justify-between text-xs pt-4 mb-2.5">
+                        <span className="font-medium text-[#9fb3b0]">Difficulty</span>
+                        <span
+                          className="font-bold inline-flex items-center gap-1"
+                          style={{ color: activeDifficulty.accent }}
+                        >
+                          {difficulty === 'no_mercy' && <Skull className="w-3.5 h-3.5" />}
+                          <span>{activeDifficulty.tier}</span>
+                        </span>
+                      </div>
 
-                {isGuestInvite ? (
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      type="button"
-                      onClick={handleJoinInvite}
-                      className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                      style={{ backgroundColor: activeTheme.accent }}
-                    >
-                      Join Match
-                    </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      type="button"
-                      onClick={() => {
-                        window.history.replaceState({}, '', '/');
-                        startSoloRound(nameDraft, false);
-                      }}
-                      className="h-12 px-5 rounded-xl text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                      style={{
-                        backgroundColor: 'rgba(255,255,255,0.04)',
-                        borderColor: activeTheme.surfaceBorder,
-                      }}
-                    >
-                      Solo vs CPU
-                    </motion.button>
-                  </div>
-                ) : (
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      type="button"
-                      onClick={() => {
-                        const cleaned = nameDraft.trim() || 'Player';
-                        setPlayerName(cleaned);
-                        try {
-                          localStorage.setItem('puno-player-name', cleaned);
-                        } catch {
-                          // ignore
-                        }
-                        startSoloRound(cleaned, false);
-                      }}
-                      className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                      style={{ backgroundColor: activeTheme.accent }}
-                    >
-                      Play vs CPU
-                    </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      type="button"
-                      disabled={roomBusy}
-                      onClick={handleHostMultiplayer}
-                      className="h-12 inline-flex items-center justify-center gap-2 px-5 rounded-xl disabled:opacity-50 text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                      style={{
-                        backgroundColor: 'rgba(255,255,255,0.04)',
-                        borderColor: activeTheme.surfaceBorder,
-                      }}
-                    >
-                      <Users className="w-4 h-4" style={{ color: activeTheme.accent }} />
-                      <span>{roomBusy ? 'Creating...' : 'Host 2P QR'}</span>
-                    </motion.button>
-                  </div>
-                )}
-              </motion.div>
+                      <div
+                        className="grid grid-cols-4 gap-1 p-1 rounded-xl border bg-black/25"
+                        style={{ borderColor: activeTheme.surfaceBorder }}
+                        role="radiogroup"
+                        aria-label="Difficulty level"
+                      >
+                        {DIFFICULTY_LIST.map((d) => {
+                          const selected = d.id === difficulty;
+                          return (
+                            <button
+                              key={d.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={selected}
+                              onClick={() => selectDifficulty(d.id)}
+                              className={`h-9 rounded-lg text-xs font-bold transition-all whitespace-nowrap px-1.5 focus-visible:outline-2 focus-visible:outline-white ${
+                                selected ? 'text-[#10141e] shadow-sm' : 'text-[#b8cac8] hover:text-white'
+                              }`}
+                              style={selected ? { backgroundColor: d.accent } : undefined}
+                            >
+                              {d.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <p className="mt-2 text-[11px] text-[#9fb3b0] leading-snug">
+                        {activeDifficulty.summary}
+                      </p>
+                    </div>
+                  )}
+
+                  {networkError && (
+                    <div className="rounded-xl bg-[#ee3f4f]/15 border border-[#ee3f4f]/50 px-4 py-2.5 text-xs text-[#ffb4bc]">
+                      {networkError}
+                    </div>
+                  )}
+
+                  {/* Play Actions */}
+                  {isGuestInvite ? (
+                    <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        type="button"
+                        onClick={handleJoinInvite}
+                        className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                        style={{ backgroundColor: activeTheme.accent }}
+                      >
+                        Join Match
+                      </motion.button>
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        type="button"
+                        onClick={() => {
+                          window.history.replaceState({}, '', window.location.pathname);
+                          startSoloRound(nameDraft, false);
+                        }}
+                        className="h-12 px-5 rounded-xl text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                        style={{
+                          backgroundColor: 'rgba(255,255,255,0.04)',
+                          borderColor: activeTheme.surfaceBorder,
+                        }}
+                      >
+                        Solo vs CPU
+                      </motion.button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        type="button"
+                        onClick={() => {
+                          const cleaned = nameDraft.trim() || 'Player';
+                          setPlayerName(cleaned);
+                          try {
+                            localStorage.setItem('puno-player-name', cleaned);
+                          } catch {
+                            // ignore
+                          }
+                          startSoloRound(cleaned, false);
+                        }}
+                        className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                        style={{ backgroundColor: activeTheme.accent }}
+                      >
+                        {playerCount === 2 ? 'Play vs CPU' : `Play vs ${playerCount - 1} CPUs`}
+                      </motion.button>
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        type="button"
+                        disabled={roomBusy}
+                        onClick={handleHostMultiplayer}
+                        className="h-12 inline-flex items-center justify-center gap-2 px-5 rounded-xl disabled:opacity-50 text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                        style={{
+                          backgroundColor: 'rgba(255,255,255,0.04)',
+                          borderColor: activeTheme.surfaceBorder,
+                        }}
+                      >
+                        <Users className="w-4 h-4" style={{ color: activeTheme.accent }} />
+                        <span>{roomBusy ? 'Creating...' : `Host ${playerCount}P QR`}</span>
+                      </motion.button>
+                    </div>
+                  )}
+                </motion.div>
+              </div>
             </div>
           </div>
         ) : (
@@ -1883,7 +2188,7 @@ export default function App() {
               className={`block w-full h-full touch-manipulation ${pointerActive ? 'cursor-pointer' : 'cursor-default'}`}
             />
 
-            {activeView && (
+            {activeView && activeView.playerCount === 2 && (
               <div className="pointer-events-none absolute top-3 left-3 sm:top-5 sm:left-5 flex items-center gap-3">
                 <div
                   className="h-10 w-10 rounded-full flex items-center justify-center font-display font-bold text-base border-2 transition-colors"
@@ -2397,7 +2702,9 @@ export default function App() {
                     textShadow: isSelfWin ? `0 0 28px ${badgeColor}55` : undefined,
                   }}
                 >
-                  {isSelfWin ? 'YOU WIN!' : `${activeView.opponentName.toUpperCase()} WINS`}
+                  {isSelfWin
+                    ? 'YOU WIN!'
+                    : `${(activeView.winnerName ?? activeView.opponentName).toUpperCase()} WINS`}
                 </motion.h2>
 
                 {activeMilestone && (
@@ -2415,15 +2722,35 @@ export default function App() {
                   </motion.p>
                 )}
 
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.18 }}
-                  className="text-lg font-mono-tabular font-bold text-[#f4f4ed] mt-2 mb-2"
-                >
-                  {activeView.selfName} {activeView.score.self} : {activeView.score.opponent}{' '}
-                  {activeView.opponentName}
-                </motion.div>
+                {activeView.playerCount === 2 ? (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.18 }}
+                    className="text-lg font-mono-tabular font-bold text-[#f4f4ed] mt-2 mb-2"
+                  >
+                    {activeView.selfName} {activeView.score.self} : {activeView.score.opponent}{' '}
+                    {activeView.opponentName}
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.18 }}
+                    className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs font-mono-tabular text-[#d6e2e0] mt-2 mb-2"
+                  >
+                    {activeView.seats.map((seat) => (
+                      <span
+                        key={seat.index}
+                        style={{
+                          color: seat.index === activeView.winnerIndex ? activeTheme.accent : undefined,
+                        }}
+                      >
+                        {seat.name}: {seat.score}
+                      </span>
+                    ))}
+                  </motion.div>
+                )}
 
                 {careerWins > 0 && (
                   <motion.div
@@ -2472,10 +2799,17 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       clearSoloTimers();
-                      if (wsRef.current) {
-                        wsRef.current.close();
-                        wsRef.current = null;
+                      if (reconnectTimerRef.current) {
+                        window.clearTimeout(reconnectTimerRef.current);
+                        reconnectTimerRef.current = null;
                       }
+                      if (wsRef.current) {
+                        const oldWs = wsRef.current;
+                        wsRef.current = null;
+                        oldWs.close();
+                      }
+                      modeRef.current = 'solo';
+                      setMode('solo');
                       setScreen('TITLE_MENU');
                     }}
                     className="h-12 px-5 rounded-xl text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
@@ -2555,9 +2889,17 @@ export default function App() {
         <QrInviteModal
           inviteUrl={inviteUrl}
           roomId={roomId}
+          playerCount={multiView?.playerCount ?? playerCount}
+          seats={multiView?.seats ?? []}
+          isHost={multiView ? multiView.selfIndex === 0 : true}
+          isWaiting={multiView ? multiView.turn === 'waiting' : true}
           opponentConnected={Boolean(multiView?.opponentConnected)}
           opponentName={multiView?.opponentName || 'Friend'}
           theme={activeTheme}
+          onStartWithCpus={() => {
+            sendWsAction({ type: 'start_now' });
+            setShowQrModal(false);
+          }}
           onClose={() => setShowQrModal(false)}
         />
       )}

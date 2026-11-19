@@ -1,3 +1,5 @@
+import type { TableThemeId } from './themes.ts';
+
 class SoundEffects {
   private ctx: AudioContext | null = null;
   public muted = false;
@@ -103,11 +105,17 @@ class SoundEffects {
     });
   }
 
-  public playWin(milestone?: 1 | 5 | 10): void {
+  public playWin(milestone?: 1 | 5 | 10, themeId: TableThemeId = 'emerald'): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
 
-    const scheduleNote = (freq: number, delay: number, dur: number, vol: number, type: OscillatorType = 'triangle') => {
+    const scheduleNote = (
+      freq: number,
+      delay: number,
+      dur: number,
+      vol: number,
+      type: OscillatorType = 'triangle'
+    ) => {
       const now = ctx.currentTime + delay;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -121,28 +129,49 @@ class SoundEffects {
       osc.stop(now + dur + 0.02);
     };
 
+    const themeVoice: Record<TableThemeId, OscillatorType> = {
+      emerald: 'triangle',
+      burgundy: 'sine',
+      obsidian: 'sawtooth',
+      sakura: 'sine',
+      pharaoh: 'triangle',
+      aurora: 'sine',
+    };
+
+    const voice = themeVoice[themeId];
+    const baseVol = voice === 'sawtooth' ? 0.055 : 0.09;
+
+    const scales: Record<TableThemeId, number[]> = {
+      emerald: [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98, 2093.0],
+      burgundy: [440.0, 554.37, 659.25, 830.61, 987.77, 1318.51, 1661.22],
+      obsidian: [392.0, 523.25, 587.33, 783.99, 1046.5, 1174.66, 1567.98],
+      sakura: [440.0, 493.88, 659.25, 739.99, 880.0, 1174.66, 1479.98], // Yo pentatonic feel
+      pharaoh: [329.63, 440.0, 493.88, 659.25, 880.0, 987.77, 1318.51],
+      aurora: [587.33, 739.99, 880.0, 1108.73, 1318.51, 1479.98, 1760.0],
+    };
+
+    const scale = scales[themeId];
+
     if (milestone === 10) {
-      const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98, 2093.0];
-      notes.forEach((f, i) => scheduleNote(f, i * 0.075, 0.55, 0.095, 'triangle'));
-      [523.25, 783.99, 1046.5, 1567.98].forEach((f) => scheduleNote(f, 0.52, 0.85, 0.06, 'sine'));
+      scale.forEach((f, i) => scheduleNote(f, i * 0.072, 0.58, baseVol, voice));
+      [scale[0], scale[2], scale[3], scale[5]].forEach((f) =>
+        scheduleNote(f, 0.52, 0.9, 0.05, 'sine')
+      );
       return;
     }
 
     if (milestone === 5) {
-      const notes = [523.25, 659.25, 783.99, 987.77, 1046.5, 1318.51];
-      notes.forEach((f, i) => scheduleNote(f, i * 0.08, 0.45, 0.09, 'triangle'));
-      scheduleNote(1046.5, 0.44, 0.65, 0.06, 'sine');
+      scale.slice(0, 6).forEach((f, i) => scheduleNote(f, i * 0.078, 0.46, baseVol, voice));
+      scheduleNote(scale[3], 0.45, 0.65, 0.055, 'sine');
       return;
     }
 
     if (milestone === 1) {
-      const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51];
-      notes.forEach((f, i) => scheduleNote(f, i * 0.085, 0.42, 0.09, 'triangle'));
+      scale.slice(0, 5).forEach((f, i) => scheduleNote(f, i * 0.084, 0.42, baseVol, voice));
       return;
     }
 
-    const notes = [523.25, 659.25, 783.99, 1046.5];
-    notes.forEach((f, i) => scheduleNote(f, i * 0.09, 0.35, 0.09, 'triangle'));
+    scale.slice(0, 4).forEach((f, i) => scheduleNote(f, i * 0.09, 0.35, baseVol, voice));
   }
 
   public playPenalty(): void {

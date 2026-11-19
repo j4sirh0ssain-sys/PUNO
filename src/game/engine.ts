@@ -1,6 +1,8 @@
 import {
   COLORS,
   DRAW_CARD_AMOUNTS,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
   POWER_CARD_VALUES,
   type Card,
   type DifficultyLevel,
@@ -11,41 +13,54 @@ export function isDifficultyLevel(value: unknown): value is DifficultyLevel {
   return value === 'chill' || value === 'normal' || value === 'hard' || value === 'no_mercy';
 }
 
+export function clampPlayerCount(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return MIN_PLAYERS;
+  return Math.max(MIN_PLAYERS, Math.min(MAX_PLAYERS, Math.round(num)));
+}
+
 export function getDrawAmount(card: Card | undefined): number {
   if (!card) return 0;
   return DRAW_CARD_AMOUNTS[card.value] ?? 0;
 }
 
-export function makeDeck(difficulty: DifficultyLevel = 'normal'): Card[] {
+export function makeDeck(
+  difficulty: DifficultyLevel = 'normal',
+  playerCount: number = MIN_PLAYERS
+): Card[] {
+  const deckCopies = playerCount >= 7 ? 2 : 1;
   const cards: Card[] = [];
   let uid = 0;
-  for (const color of COLORS) {
-    cards.push({ color, value: '0', uid: uid++ });
-    const doubled = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Skip', 'Reverse', '+2'];
-    for (const value of doubled) {
-      cards.push({ color, value, uid: uid++ });
-      cards.push({ color, value, uid: uid++ });
+
+  for (let copy = 0; copy < deckCopies; copy++) {
+    for (const color of COLORS) {
+      cards.push({ color, value: '0', uid: uid++ });
+      const doubled = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Skip', 'Reverse', '+2'];
+      for (const value of doubled) {
+        cards.push({ color, value, uid: uid++ });
+        cards.push({ color, value, uid: uid++ });
+      }
+      if (difficulty === 'no_mercy') {
+        cards.push({ color, value: 'Skip All', uid: uid++ });
+        cards.push({ color, value: 'Skip All', uid: uid++ });
+        cards.push({ color, value: 'Dump', uid: uid++ });
+        cards.push({ color, value: 'Dump', uid: uid++ });
+        cards.push({ color, value: '+4', uid: uid++ });
+      }
+    }
+    for (const value of ['Wild', '+4']) {
+      for (let i = 0; i < 4; i++) {
+        cards.push({ color: 'Wild', value, uid: uid++ });
+      }
     }
     if (difficulty === 'no_mercy') {
-      cards.push({ color, value: 'Skip All', uid: uid++ });
-      cards.push({ color, value: 'Skip All', uid: uid++ });
-      cards.push({ color, value: 'Dump', uid: uid++ });
-      cards.push({ color, value: 'Dump', uid: uid++ });
-      cards.push({ color, value: '+4', uid: uid++ });
-    }
-  }
-  for (const value of ['Wild', '+4']) {
-    for (let i = 0; i < 4; i++) {
-      cards.push({ color: 'Wild', value, uid: uid++ });
-    }
-  }
-  if (difficulty === 'no_mercy') {
-    for (let i = 0; i < 4; i++) {
-      cards.push({ color: 'Wild', value: '+6', uid: uid++ });
-      cards.push({ color: 'Wild', value: 'Roulette', uid: uid++ });
-    }
-    for (let i = 0; i < 2; i++) {
-      cards.push({ color: 'Wild', value: '+10', uid: uid++ });
+      for (let i = 0; i < 4; i++) {
+        cards.push({ color: 'Wild', value: '+6', uid: uid++ });
+        cards.push({ color: 'Wild', value: 'Roulette', uid: uid++ });
+      }
+      for (let i = 0; i < 2; i++) {
+        cards.push({ color: 'Wild', value: '+10', uid: uid++ });
+      }
     }
   }
   return cards;
@@ -82,40 +97,42 @@ export function isSuitColor(value: unknown): value is SuitColor {
   return typeof value === 'string' && (COLORS as readonly string[]).includes(value);
 }
 
-export interface RoundDeal {
+export interface MultiRoundDeal {
   deck: Card[];
-  hostHand: Card[];
-  guestHand: Card[];
+  hands: Card[][];
   discard: Card[];
   currentColor: SuitColor;
-  jasirBoost: boolean;
+  jasirSeatIndexes: number[];
 }
 
-export function dealRound(
-  hostName: string,
+export function dealRoundMulti(
+  seatNames: string[],
   difficulty: DifficultyLevel = 'normal'
-): RoundDeal {
-  const deck = shuffle(makeDeck(difficulty));
-  const hostHand: Card[] = [];
-  const guestHand: Card[] = [];
+): MultiRoundDeal {
+  const count = clampPlayerCount(seatNames.length);
+  const deck = shuffle(makeDeck(difficulty, count));
+  const hands: Card[][] = Array.from({ length: count }, () => []);
+  const jasirSeatIndexes: number[] = [];
 
-  const jasirBoost = hostName.trim().toLowerCase() === 'j4s1r';
-  if (jasirBoost) {
-    for (let i = deck.length - 1; i >= 0 && hostHand.length < 7; i--) {
-      if (POWER_CARD_VALUES.has(deck[i].value)) {
-        const [powerCard] = deck.splice(i, 1);
-        hostHand.push(powerCard);
+  seatNames.slice(0, count).forEach((name, idx) => {
+    if (name.trim().toLowerCase() === 'j4s1r') {
+      jasirSeatIndexes.push(idx);
+      for (let i = deck.length - 1; i >= 0 && hands[idx].length < 7; i--) {
+        if (POWER_CARD_VALUES.has(deck[i].value)) {
+          const [powerCard] = deck.splice(i, 1);
+          hands[idx].push(powerCard);
+        }
       }
     }
-  }
+  });
 
-  for (let i = 0; i < 7; i++) {
-    if (!jasirBoost) {
-      const h = deck.pop();
-      if (h) hostHand.push(h);
+  for (let round = 0; round < 7; round++) {
+    for (let seat = 0; seat < count; seat++) {
+      if (hands[seat].length < 7) {
+        const c = deck.pop();
+        if (c) hands[seat].push(c);
+      }
     }
-    const g = deck.pop();
-    if (g) guestHand.push(g);
   }
 
   let starterIdx = deck.length - 1;
@@ -130,12 +147,56 @@ export function dealRound(
 
   return {
     deck,
-    hostHand,
-    guestHand,
+    hands,
     discard: [starter],
     currentColor,
-    jasirBoost,
+    jasirSeatIndexes,
   };
+}
+
+export interface RoundDeal {
+  deck: Card[];
+  hostHand: Card[];
+  guestHand: Card[];
+  discard: Card[];
+  currentColor: SuitColor;
+  jasirBoost: boolean;
+}
+
+export function dealRound(
+  hostName: string,
+  difficulty: DifficultyLevel = 'normal'
+): RoundDeal {
+  const multi = dealRoundMulti([hostName, 'Opponent'], difficulty);
+  return {
+    deck: multi.deck,
+    hostHand: multi.hands[0],
+    guestHand: multi.hands[1],
+    discard: multi.discard,
+    currentColor: multi.currentColor,
+    jasirBoost: multi.jasirSeatIndexes.includes(0),
+  };
+}
+
+export function getNextAliveSeatIndex(
+  eliminatedFlags: boolean[],
+  fromIndex: number,
+  direction: 1 | -1,
+  steps = 1
+): number {
+  const total = eliminatedFlags.length;
+  if (total === 0) return 0;
+  let idx = fromIndex;
+  let moved = 0;
+  let guard = 0;
+  while (moved < steps && guard < total * (steps + 2)) {
+    idx = (idx + direction + total) % total;
+    if (!eliminatedFlags[idx]) {
+      moved++;
+    }
+    guard++;
+  }
+  return idx;
 }
 
 export function drawOneFromDeck(
@@ -237,7 +298,6 @@ export function chooseCpuCard(
 
   const scoreCard = (c: Card): number => {
     if (pendingDrawMin > 0) {
-      // Save +10 unless needed; prefer lowest sufficient draw card
       return 100 - getDrawAmount(c);
     }
 
@@ -259,7 +319,6 @@ export function chooseCpuCard(
     } else if (c.value === 'Wild') {
       score += cpuHand.length <= 2 ? 18 : 2;
     } else {
-      // Play matching suit numbers from the largest suit first
       const suitWeight = isSuitColor(c.color) ? colorCounts[c.color] * 2.2 : 0;
       score += 13 + suitWeight;
     }

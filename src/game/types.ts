@@ -2,6 +2,9 @@ export const COLORS = ['Red', 'Blue', 'Green', 'Yellow'] as const;
 export type SuitColor = (typeof COLORS)[number];
 export type CardColor = SuitColor | 'Wild';
 
+export const MIN_PLAYERS = 2;
+export const MAX_PLAYERS = 10;
+
 export type DifficultyLevel = 'chill' | 'normal' | 'hard' | 'no_mercy';
 
 export interface DifficultyInfo {
@@ -103,6 +106,17 @@ export type TurnPhase = 'waiting' | 'dealing' | 'host' | 'guest' | 'busy' | 'ove
 
 export type GameMode = 'solo' | 'multiplayer';
 
+export interface SeatInfo {
+  index: number;
+  name: string;
+  isCpu: boolean;
+  connected: boolean;
+  cardCount: number;
+  unoArmed: boolean;
+  eliminated: boolean;
+  score: number;
+}
+
 export type EffectEvent =
   | {
       kind: 'impact';
@@ -151,6 +165,8 @@ export type EffectEvent =
   | {
       kind: 'win';
       winnerRole: PlayerRole;
+      winnerIndex?: number;
+      winnerName?: string;
       milestone?: 1 | 5 | 10;
     }
   | {
@@ -163,6 +179,11 @@ export interface ClientGameView {
   roomId: string;
   mode: GameMode;
   difficulty: DifficultyLevel;
+  playerCount: number;
+  selfIndex: number;
+  turnIndex: number | null;
+  direction: 1 | -1;
+  seats: SeatInfo[];
   selfRole: PlayerRole;
   selfName: string;
   opponentName: string;
@@ -180,6 +201,8 @@ export interface ClientGameView {
   selfUnoArmed: boolean;
   opponentUnoArmed: boolean;
   winner: PlayerRole | null;
+  winnerIndex: number | null;
+  winnerName: string | null;
   score: {
     self: number;
     opponent: number;
@@ -206,6 +229,9 @@ export type ClientWsAction =
       token: string;
       clientId: string;
       name: string;
+    }
+  | {
+      type: 'start_now';
     }
   | {
       type: 'play';

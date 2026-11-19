@@ -7,12 +7,17 @@ import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   canPlayCard,
-  dealRound,
+  chooseCpuCard,
+  chooseCpuWildColor,
+  clampPlayerCount,
+  dealRoundMulti,
   drawColorRoulette,
   drawOneFromDeck,
   getDrawAmount,
+  getNextAliveSeatIndex,
   isDifficultyLevel,
   isSuitColor,
+  shouldCpuCallUno,
 } from './src/game/engine.ts';
 import {
   MERCY_HAND_LIMIT,
@@ -22,6 +27,7 @@ import {
   type DifficultyLevel,
   type EffectEvent,
   type PlayerRole,
+  type SeatInfo,
   type ServerWsMessage,
   type SuitColor,
   type TurnPhase,
@@ -30,31 +36,39 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+interface ServerSeat {
+  index: number;
+  clientId: string | null;
+  name: string;
+  ws: WebSocket | null;
+  isCpu: boolean;
+  hand: Card[];
+  unoArmed: boolean;
+  eliminated: boolean;
+  score: number;
+}
+
 interface RoomState {
   roomId: string;
   token: string;
   difficulty: DifficultyLevel;
-  hostClientId: string | null;
-  guestClientId: string | null;
-  hostName: string;
-  guestName: string;
-  hostWs: WebSocket | null;
-  guestWs: WebSocket | null;
+  playerCount: number;
+  seats: ServerSeat[];
   deck: Card[];
-  hostHand: Card[];
-  guestHand: Card[];
   discard: Card[];
   currentColor: SuitColor;
   turn: TurnPhase;
+  turnIndex: number;
+  direction: 1 | -1;
   drawnUid: number | null;
   pendingDrawStack: number;
   pendingDrawMin: number;
-  hostUnoArmed: boolean;
-  guestUnoArmed: boolean;
   winner: PlayerRole | null;
-  score: { host: number; guest: number };
+  winnerIndex: number | null;
+  winnerName: string | null;
   message: string;
   roundId: number;
+  cpuTimer: NodeJS.Timeout | null;
   createdAt: number;
   lastActivityAt: number;
 }
@@ -66,6 +80,10 @@ setInterval(() => {
   const cutoff = Date.now() - 6 * 60 * 60 * 1000;
   for (const [id, room] of rooms.entries()) {
     if (room.lastActivityAt < cutoff) {
+      if (room.cpuTimer) {
+        clearTimeout(room.cpuTimer);
+        room.cpuTimer = null;
+      }
       rooms.delete(id);
     }
   }
@@ -77,38 +95,58 @@ function sanitizeName(raw: unknown, fallback: string): string {
   return cleaned || fallback;
 }
 
-function createRoom(hostNameRaw?: unknown, difficultyRaw?: unknown): RoomState {
+function createRoom(
+  hostNameRaw?: unknown,
+  difficultyRaw?: unknown,
+  playerCountRaw?: unknown
+): RoomState {
   const roomId = crypto.randomBytes(4).toString('hex').toUpperCase();
   const token = crypto.randomBytes(16).toString('base64url');
   const hostName = sanitizeName(hostNameRaw, 'Host');
   const difficulty: DifficultyLevel = isDifficultyLevel(difficultyRaw) ? difficultyRaw : 'normal';
-  const dealt = dealRound(hostName, difficulty);
+  const playerCount = clampPlayerCount(playerCountRaw);
+
+  const seatNames = Array.from({ length: playerCount }, (_, idx) =>
+    idx === 0 ? hostName : `Player ${idx + 1}`
+  );
+  const dealt = dealRoundMulti(seatNames, difficulty);
+
+  const seats: ServerSeat[] = seatNames.map((name, idx) => ({
+    index: idx,
+    clientId: null,
+    name,
+    ws: null,
+    isCpu: false,
+    hand: dealt.hands[idx] ?? [],
+    unoArmed: false,
+    eliminated: false,
+    score: 0,
+  }));
 
   const room: RoomState = {
     roomId,
     token,
     difficulty,
-    hostClientId: null,
-    guestClientId: null,
-    hostName,
-    guestName: 'Friend',
-    hostWs: null,
-    guestWs: null,
+    playerCount,
+    seats,
     deck: dealt.deck,
-    hostHand: dealt.hostHand,
-    guestHand: dealt.guestHand,
     discard: dealt.discard,
     currentColor: dealt.currentColor,
     turn: 'waiting',
+    turnIndex: 0,
+    direction: 1,
     drawnUid: null,
     pendingDrawStack: 0,
     pendingDrawMin: 0,
-    hostUnoArmed: false,
-    guestUnoArmed: false,
     winner: null,
-    score: { host: 0, guest: 0 },
-    message: 'Waiting for the second player to scan or open the invite link.',
+    winnerIndex: null,
+    winnerName: null,
+    message:
+      playerCount === 2
+        ? 'Waiting for the second player to scan or open the invite link.'
+        : `Waiting for players (0/${playerCount} ready) — share the QR link or start with CPUs.`,
     roundId: 1,
+    cpuTimer: null,
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
   };
@@ -116,38 +154,89 @@ function createRoom(hostNameRaw?: unknown, difficultyRaw?: unknown): RoomState {
   return room;
 }
 
-function buildView(room: RoomState, role: PlayerRole): ClientGameView {
-  const isHost = role === 'host';
-  const selfHand = isHost ? room.hostHand : room.guestHand;
-  const opponentHand = isHost ? room.guestHand : room.hostHand;
-  const opponentConnected = isHost
-    ? room.guestClientId !== null && room.guestWs?.readyState === WebSocket.OPEN
-    : room.hostClientId !== null && room.hostWs?.readyState === WebSocket.OPEN;
+function getSeatConnected(seat: ServerSeat): boolean {
+  return seat.isCpu || (seat.clientId !== null && seat.ws?.readyState === WebSocket.OPEN);
+}
+
+function getAliveSeats(room: RoomState): ServerSeat[] {
+  return room.seats.filter((s) => !s.eliminated);
+}
+
+function advanceTurn(room: RoomState, steps = 1): number {
+  const flags = room.seats.map((s) => s.eliminated);
+  return getNextAliveSeatIndex(flags, room.turnIndex, room.direction, steps);
+}
+
+function buildView(room: RoomState, seatIndex: number): ClientGameView {
+  const selfSeat = room.seats[seatIndex] ?? room.seats[0];
+  const selfRole: PlayerRole = seatIndex === 0 ? 'host' : 'guest';
+  const nextIndex = (seatIndex + 1) % room.seats.length;
+  const primaryOpp = room.seats[nextIndex] ?? room.seats[0];
+
+  const seatInfos: SeatInfo[] = room.seats.map((s) => ({
+    index: s.index,
+    name: s.name,
+    isCpu: s.isCpu,
+    connected: getSeatConnected(s),
+    cardCount: s.hand.length,
+    unoArmed: s.unoArmed,
+    eliminated: s.eliminated,
+    score: s.score,
+  }));
+
+  let viewTurn: TurnPhase;
+  if (room.turn === 'waiting' || room.turn === 'over' || room.turn === 'dealing' || room.turn === 'busy') {
+    viewTurn = room.turn;
+  } else if (room.turnIndex === seatIndex) {
+    viewTurn = selfRole;
+  } else {
+    viewTurn = selfRole === 'host' ? 'guest' : 'host';
+  }
+
+  let viewWinner: PlayerRole | null = null;
+  if (room.winnerIndex !== null) {
+    viewWinner = room.winnerIndex === seatIndex ? selfRole : selfRole === 'host' ? 'guest' : 'host';
+  }
+
+  const bestOppScore = room.seats.reduce(
+    (max, s) => (s.index === seatIndex ? max : Math.max(max, s.score)),
+    0
+  );
 
   return {
     roomId: room.roomId,
     mode: 'multiplayer',
     difficulty: room.difficulty,
-    selfRole: role,
-    selfName: isHost ? room.hostName : room.guestName,
-    opponentName: isHost ? room.guestName : room.hostName,
-    opponentConnected,
-    selfHand,
-    opponentCardIds: opponentHand.map((c) => c.uid),
-    opponentCount: opponentHand.length,
+    playerCount: room.playerCount,
+    selfIndex: seatIndex,
+    turnIndex: room.turn === 'host' || room.turn === 'guest' ? room.turnIndex : null,
+    direction: room.direction,
+    seats: seatInfos,
+    selfRole,
+    selfName: selfSeat.name,
+    opponentName: primaryOpp.name,
+    opponentConnected:
+      room.playerCount === 2
+        ? getSeatConnected(primaryOpp)
+        : room.seats.some((s) => s.index !== seatIndex && getSeatConnected(s)),
+    selfHand: selfSeat.hand,
+    opponentCardIds: room.playerCount === 2 ? primaryOpp.hand.map((c) => c.uid) : [],
+    opponentCount: primaryOpp.hand.length,
     discardPile: room.discard.slice(-5),
     deckCount: room.deck.length,
     currentColor: room.currentColor,
-    turn: room.turn,
+    turn: viewTurn,
     drawnUid: room.drawnUid,
     pendingDrawStack: room.pendingDrawStack,
     pendingDrawMin: room.pendingDrawMin,
-    selfUnoArmed: isHost ? room.hostUnoArmed : room.guestUnoArmed,
-    opponentUnoArmed: isHost ? room.guestUnoArmed : room.hostUnoArmed,
-    winner: room.winner,
+    selfUnoArmed: selfSeat.unoArmed,
+    opponentUnoArmed: primaryOpp.unoArmed,
+    winner: viewWinner,
+    winnerIndex: room.winnerIndex,
+    winnerName: room.winnerName,
     score: {
-      self: isHost ? room.score.host : room.score.guest,
-      opponent: isHost ? room.score.guest : room.score.host,
+      self: selfSeat.score,
+      opponent: bestOppScore,
     },
     message: room.message,
     roundId: room.roundId,
@@ -163,70 +252,437 @@ function sendError(ws: WebSocket, message: string): void {
 
 function broadcastRoom(
   room: RoomState,
-  hostEffects: EffectEvent[] = [],
-  guestEffects: EffectEvent[] = []
+  perSeatEffects?: (seatIndex: number) => EffectEvent[]
 ): void {
   room.lastActivityAt = Date.now();
-  if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) {
-    const payload: ServerWsMessage = {
-      type: 'state',
-      view: buildView(room, 'host'),
-      effects: hostEffects,
-    };
-    room.hostWs.send(JSON.stringify(payload));
-  }
-  if (room.guestWs && room.guestWs.readyState === WebSocket.OPEN) {
-    const payload: ServerWsMessage = {
-      type: 'state',
-      view: buildView(room, 'guest'),
-      effects: guestEffects,
-    };
-    room.guestWs.send(JSON.stringify(payload));
+  for (const seat of room.seats) {
+    if (seat.ws && seat.ws.readyState === WebSocket.OPEN) {
+      const payload: ServerWsMessage = {
+        type: 'state',
+        view: buildView(room, seat.index),
+        effects: perSeatEffects ? perSeatEffects(seat.index) : [],
+      };
+      seat.ws.send(JSON.stringify(payload));
+    }
   }
 }
 
-function startFreshRound(room: RoomState, nextDifficulty?: DifficultyLevel): void {
+function clearCpuTimer(room: RoomState): void {
+  if (room.cpuTimer) {
+    clearTimeout(room.cpuTimer);
+    room.cpuTimer = null;
+  }
+}
+
+function recycleHandToDeck(room: RoomState, hand: Card[]): void {
+  if (hand.length === 0) return;
+  room.deck.unshift(...hand.splice(0, hand.length));
+}
+
+function scheduleCpuIfNeeded(room: RoomState): void {
+  clearCpuTimer(room);
+  if (room.winnerIndex !== null || (room.turn !== 'host' && room.turn !== 'guest')) return;
+  const activeSeat = room.seats[room.turnIndex];
+  if (!activeSeat || !activeSeat.isCpu || activeSeat.eliminated) return;
+
+  const expectedRound = room.roundId;
+  const expectedSeatIndex = activeSeat.index;
+  room.cpuTimer = setTimeout(() => {
+    if (
+      room.roundId !== expectedRound ||
+      room.winnerIndex !== null ||
+      room.turnIndex !== expectedSeatIndex ||
+      !activeSeat.isCpu ||
+      activeSeat.eliminated
+    ) {
+      return;
+    }
+    executeCpuTurn(room, activeSeat);
+  }, 800);
+}
+
+function finishRoundWithWinner(
+  room: RoomState,
+  winnerSeat: ServerSeat,
+  message: string,
+  extraEffectsForSeat?: (seatIdx: number) => EffectEvent[]
+): void {
+  clearCpuTimer(room);
+  room.pendingDrawStack = 0;
+  room.pendingDrawMin = 0;
+  room.winner = winnerSeat.index === 0 ? 'host' : 'guest';
+  room.winnerIndex = winnerSeat.index;
+  room.winnerName = winnerSeat.name;
+  room.turn = 'over';
+  winnerSeat.score += 1;
+  room.message = message;
+  broadcastRoom(room, (seatIdx) => {
+    const extra = extraEffectsForSeat ? extraEffectsForSeat(seatIdx) : [];
+    return [
+      ...extra,
+      {
+        kind: 'win',
+        winnerRole: winnerSeat.index === seatIdx ? (seatIdx === 0 ? 'host' : 'guest') : seatIdx === 0 ? 'guest' : 'host',
+        winnerIndex: winnerSeat.index,
+        winnerName: winnerSeat.name,
+      },
+    ];
+  });
+}
+
+function handleMercyKnockout(
+  room: RoomState,
+  loserSeat: ServerSeat,
+  baseEffects: EffectEvent[]
+): boolean {
+  if (room.difficulty !== 'no_mercy' || loserSeat.hand.length < MERCY_HAND_LIMIT) {
+    return false;
+  }
+  loserSeat.eliminated = true;
+  recycleHandToDeck(room, loserSeat.hand);
+  const alive = getAliveSeats(room);
+  if (alive.length <= 1) {
+    const survivor = alive[0] ?? room.seats[0];
+    finishRoundWithWinner(
+      room,
+      survivor,
+      `MERCY KO! ${loserSeat.name} hit 25+ cards — ${survivor.name} wins!`,
+      (seatIdx) => [
+        ...baseEffects,
+        { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser: loserSeat.index === seatIdx },
+      ]
+    );
+    return true;
+  }
+
+  if (room.turnIndex === loserSeat.index) {
+    room.turnIndex = advanceTurn(room, 1);
+  }
+  room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+  const nextSeat = room.seats[room.turnIndex];
+  room.message = `MERCY KO! ${loserSeat.name} eliminated! ${nextSeat.name}'s turn.`;
+  broadcastRoom(room, (seatIdx) => [
+    ...baseEffects,
+    { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser: loserSeat.index === seatIdx },
+  ]);
+  scheduleCpuIfNeeded(room);
+  return true;
+}
+
+function commitSeatPlay(
+  room: RoomState,
+  activeSeat: ServerSeat,
+  cardIndex: number,
+  chosenColor: SuitColor
+): void {
+  const card = activeSeat.hand[cardIndex];
+  const wasUnoArmed = activeSeat.unoArmed;
+  activeSeat.unoArmed = false;
+  activeSeat.hand.splice(cardIndex, 1);
+
+  const sharedEffects: EffectEvent[] = [];
+
+  if (card.value === 'Dump' && card.color !== 'Wild') {
+    const extras: Card[] = [];
+    for (let i = activeSeat.hand.length - 1; i >= 0; i--) {
+      if (activeSeat.hand[i].color === card.color) {
+        const [matched] = activeSeat.hand.splice(i, 1);
+        extras.push(matched);
+      }
+    }
+    room.discard.push(...extras);
+    sharedEffects.push({
+      kind: 'dump',
+      whoName: activeSeat.name,
+      color: chosenColor,
+      count: extras.length + 1,
+    });
+  }
+
+  room.discard.push(card);
+  room.currentColor = chosenColor;
+  room.drawnUid = null;
+  sharedEffects.push({ kind: 'impact', card, activeColor: chosenColor });
+
+  if (activeSeat.hand.length === 0) {
+    finishRoundWithWinner(room, activeSeat, `${activeSeat.name} wins the round!`, () => sharedEffects);
+    return;
+  }
+
+  let penalizedUno = false;
+  let unoTrigger: 'armed' | 'penalty' | null = null;
+  if (activeSeat.hand.length === 1) {
+    if (wasUnoArmed) {
+      unoTrigger = 'armed';
+    } else {
+      penalizedUno = true;
+      unoTrigger = 'penalty';
+      for (let i = 0; i < 2; i++) {
+        const res = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
+        if (res.reshuffled) sharedEffects.push({ kind: 'reshuffle' });
+      }
+    }
+  }
+
+  const perSeatEffects = (seatIdx: number): EffectEvent[] => {
+    const list = [...sharedEffects];
+    if (unoTrigger === 'armed') {
+      list.push({ kind: 'uno', whoName: activeSeat.name, isSelf: activeSeat.index === seatIdx });
+    } else if (unoTrigger === 'penalty') {
+      list.push({
+        kind: 'uno_penalty',
+        whoName: activeSeat.name,
+        isSelf: activeSeat.index === seatIdx,
+      });
+    }
+    return list;
+  };
+
+  const aliveCount = getAliveSeats(room).length;
+  const drawAmount = getDrawAmount(card);
+
+  if (drawAmount > 0) {
+    if (room.difficulty === 'no_mercy') {
+      room.pendingDrawStack += drawAmount;
+      room.pendingDrawMin = drawAmount;
+      room.turnIndex = advanceTurn(room, 1);
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      const targetSeat = room.seats[room.turnIndex];
+      room.message = penalizedUno
+        ? `${activeSeat.name} forgot UNO (+2)! ${targetSeat.name}: stack +${drawAmount}+ or take ${room.pendingDrawStack}!`
+        : `${targetSeat.name}: stack a +${drawAmount}+ card or take +${room.pendingDrawStack}!`;
+    } else {
+      const victimIndex = advanceTurn(room, 1);
+      const victimSeat = room.seats[victimIndex];
+      let reshuffledAny = false;
+      for (let i = 0; i < drawAmount; i++) {
+        const res = drawOneFromDeck(room.deck, room.discard, victimSeat.hand);
+        if (res.reshuffled) reshuffledAny = true;
+      }
+      if (reshuffledAny) sharedEffects.push({ kind: 'reshuffle' });
+      room.turnIndex = advanceTurn(room, 2);
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      const nextSeat = room.seats[room.turnIndex];
+      room.message = penalizedUno
+        ? `${activeSeat.name} forgot UNO (+2)! ${victimSeat.name} draws ${drawAmount}. ${nextSeat.name}'s turn.`
+        : `${victimSeat.name} draws ${drawAmount}! ${nextSeat.name}'s turn (${chosenColor}).`;
+    }
+  } else if (card.value === 'Roulette') {
+    const victimIndex = advanceTurn(room, 1);
+    const victimSeat = room.seats[victimIndex];
+    const rRes = drawColorRoulette(room.deck, room.discard, victimSeat.hand, chosenColor);
+    if (rRes.reshuffled) sharedEffects.push({ kind: 'reshuffle' });
+    sharedEffects.push({
+      kind: 'roulette',
+      whoName: victimSeat.name,
+      color: chosenColor,
+      drawnCount: rRes.drawnCount,
+    });
+
+    if (room.difficulty === 'no_mercy' && victimSeat.hand.length >= MERCY_HAND_LIMIT) {
+      if (handleMercyKnockout(room, victimSeat, perSeatEffects(victimSeat.index))) {
+        return;
+      }
+    }
+
+    room.turnIndex = advanceTurn(room, 2);
+    room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    const nextSeat = room.seats[room.turnIndex];
+    room.message = `${victimSeat.name} drew ${rRes.drawnCount} in Color Roulette! ${nextSeat.name}'s turn.`;
+  } else if (card.value === 'Skip All') {
+    room.turnIndex = activeSeat.index;
+    room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    room.message = penalizedUno
+      ? `${activeSeat.name} forgot UNO (+2)! Skip All — ${activeSeat.name} goes again.`
+      : `Skip All! ${activeSeat.name} plays again.`;
+  } else if (card.value === 'Skip') {
+    const skippedSeat = room.seats[advanceTurn(room, 1)];
+    room.turnIndex = advanceTurn(room, 2);
+    room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    const nextSeat = room.seats[room.turnIndex];
+    room.message = penalizedUno
+      ? `${activeSeat.name} forgot UNO (+2)! ${skippedSeat.name} skipped — ${nextSeat.name}'s turn.`
+      : `${skippedSeat.name} skipped! ${nextSeat.name}'s turn.`;
+  } else if (card.value === 'Reverse') {
+    if (aliveCount <= 2) {
+      room.turnIndex = activeSeat.index;
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      room.message = penalizedUno
+        ? `${activeSeat.name} forgot UNO (+2)! Reversed back to ${activeSeat.name}.`
+        : `Reversed! ${activeSeat.name} plays again.`;
+    } else {
+      room.direction = room.direction === 1 ? -1 : 1;
+      room.turnIndex = advanceTurn(room, 1);
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      const nextSeat = room.seats[room.turnIndex];
+      room.message = penalizedUno
+        ? `${activeSeat.name} forgot UNO (+2)! Direction reversed — ${nextSeat.name}'s turn.`
+        : `Direction reversed! ${nextSeat.name}'s turn.`;
+    }
+  } else {
+    room.turnIndex = advanceTurn(room, 1);
+    room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    const nextSeat = room.seats[room.turnIndex];
+    room.message = penalizedUno
+      ? `${activeSeat.name} forgot UNO (+2)! ${nextSeat.name}'s turn (${chosenColor}).`
+      : activeSeat.hand.length === 1
+        ? `${activeSeat.name} called UNO! ${nextSeat.name}'s turn (${chosenColor}).`
+        : `${nextSeat.name}'s turn — color is ${chosenColor}.`;
+  }
+
+  broadcastRoom(room, perSeatEffects);
+  scheduleCpuIfNeeded(room);
+}
+
+function executeCpuTurn(room: RoomState, cpuSeat: ServerSeat): void {
+  const top = room.discard[room.discard.length - 1];
+  const nextAliveIdx = advanceTurn(room, 1);
+  const nextAliveCount = room.seats[nextAliveIdx]?.hand.length ?? 7;
+
+  const chosen = chooseCpuCard(
+    cpuSeat.hand,
+    top,
+    room.currentColor,
+    room.difficulty,
+    room.pendingDrawMin,
+    nextAliveCount
+  );
+
+  if (room.pendingDrawStack > 0 && !chosen) {
+    const stackCount = room.pendingDrawStack;
+    const effs: EffectEvent[] = [];
+    for (let i = 0; i < stackCount; i++) {
+      const res = drawOneFromDeck(room.deck, room.discard, cpuSeat.hand);
+      if (res.reshuffled) effs.push({ kind: 'reshuffle' });
+    }
+    room.pendingDrawStack = 0;
+    room.pendingDrawMin = 0;
+    room.drawnUid = null;
+
+    if (handleMercyKnockout(room, cpuSeat, effs)) return;
+
+    room.turnIndex = advanceTurn(room, 1);
+    room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    const nextSeat = room.seats[room.turnIndex];
+    room.message = `${cpuSeat.name} took +${stackCount} cards! ${nextSeat.name}'s turn.`;
+    broadcastRoom(room, () => effs);
+    scheduleCpuIfNeeded(room);
+    return;
+  }
+
+  if (!chosen) {
+    const { card, reshuffled } = drawOneFromDeck(room.deck, room.discard, cpuSeat.hand);
+    const effs: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
+
+    if (handleMercyKnockout(room, cpuSeat, effs)) return;
+
+    if (card && canPlayCard(card, top, room.currentColor)) {
+      if (cpuSeat.hand.length === 2 && shouldCpuCallUno(room.difficulty)) {
+        cpuSeat.unoArmed = true;
+      }
+      const idx = cpuSeat.hand.findIndex((c) => c.uid === card.uid);
+      if (idx !== -1) {
+        const nextColor: SuitColor =
+          card.color === 'Wild' ? chooseCpuWildColor(cpuSeat.hand, room.difficulty) : card.color;
+        commitSeatPlay(room, cpuSeat, idx, nextColor);
+        return;
+      }
+    }
+
+    room.turnIndex = advanceTurn(room, 1);
+    room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    const nextSeat = room.seats[room.turnIndex];
+    room.message = card
+      ? `${cpuSeat.name} drew a card. ${nextSeat.name}'s turn.`
+      : `Deck empty — ${nextSeat.name}'s turn.`;
+    broadcastRoom(room, () => effs);
+    scheduleCpuIfNeeded(room);
+    return;
+  }
+
+  if (cpuSeat.hand.length === 2 && shouldCpuCallUno(room.difficulty)) {
+    cpuSeat.unoArmed = true;
+  }
+  const idx = cpuSeat.hand.findIndex((c) => c.uid === chosen.uid);
+  if (idx === -1) return;
+  const nextColor: SuitColor =
+    chosen.color === 'Wild' ? chooseCpuWildColor(cpuSeat.hand, room.difficulty) : chosen.color;
+  commitSeatPlay(room, cpuSeat, idx, nextColor);
+}
+
+function startFreshRound(room: RoomState, nextDifficulty?: DifficultyLevel, fillEmptyWithCpu = false): void {
+  clearCpuTimer(room);
   if (nextDifficulty) {
     room.difficulty = nextDifficulty;
   }
-  const dealt = dealRound(room.hostName, room.difficulty);
+
+  if (fillEmptyWithCpu) {
+    let cpuNum = 1;
+    for (const seat of room.seats) {
+      if (seat.clientId === null && !seat.isCpu) {
+        seat.isCpu = true;
+        seat.name = `CPU ${cpuNum++}`;
+      }
+    }
+  }
+
+  const dealt = dealRoundMulti(
+    room.seats.map((s) => s.name),
+    room.difficulty
+  );
   room.deck = dealt.deck;
-  room.hostHand = dealt.hostHand;
-  room.guestHand = dealt.guestHand;
   room.discard = dealt.discard;
   room.currentColor = dealt.currentColor;
   room.drawnUid = null;
   room.pendingDrawStack = 0;
   room.pendingDrawMin = 0;
-  room.hostUnoArmed = false;
-  room.guestUnoArmed = false;
+  room.direction = 1;
+  room.turnIndex = 0;
   room.winner = null;
+  room.winnerIndex = null;
+  room.winnerName = null;
   room.roundId += 1;
 
-  if (room.guestClientId) {
+  room.seats.forEach((s, idx) => {
+    s.hand = dealt.hands[idx] ?? [];
+    s.unoArmed = false;
+    s.eliminated = false;
+  });
+
+  const readyCount = room.seats.filter((s) => s.clientId !== null || s.isCpu).length;
+  const hostSeat = room.seats[0];
+  const jasirBoost = dealt.jasirSeatIndexes.length > 0;
+
+  if (readyCount >= 2) {
     room.turn = 'host';
-    room.message = dealt.jasirBoost
-      ? `j4s1r POWER-UP: 7 power cards dealt! ${room.hostName}'s turn.`
+    room.message = jasirBoost
+      ? `j4s1r POWER-UP: 7 power cards dealt! ${hostSeat.name}'s turn.`
       : room.difficulty === 'no_mercy'
-        ? `NO MERCY active — ${room.hostName}'s turn.`
-        : `${room.hostName}'s turn — match the color or value.`;
-    const dealEffect: EffectEvent = {
-      kind: 'deal',
-      isJasirBoost: dealt.jasirBoost,
-      difficulty: room.difficulty,
-    };
-    const hostEffects: EffectEvent[] = [
-      dealEffect,
-      { kind: 'banner', text: 'YOUR TURN', color: '#f5c84b', size: 0.6, dur: 1.0, delay: 0.7 },
-    ];
-    const guestEffects: EffectEvent[] = [
-      dealEffect,
-      { kind: 'banner', text: `${room.hostName.toUpperCase()} STARTS`, color: '#f5c84b', size: 0.55, dur: 1.0, delay: 0.7 },
-    ];
-    broadcastRoom(room, hostEffects, guestEffects);
+        ? `NO MERCY active — ${hostSeat.name}'s turn.`
+        : `${hostSeat.name}'s turn — match the color or value.`;
+
+    broadcastRoom(room, (seatIdx) => [
+      {
+        kind: 'deal',
+        isJasirBoost: dealt.jasirSeatIndexes.includes(seatIdx),
+        difficulty: room.difficulty,
+      },
+      {
+        kind: 'banner',
+        text: seatIdx === 0 ? 'YOUR TURN' : `${hostSeat.name.toUpperCase()} STARTS`,
+        color: '#f5c84b',
+        size: 0.58,
+        dur: 1.0,
+        delay: 0.7,
+      },
+    ]);
+    scheduleCpuIfNeeded(room);
   } else {
     room.turn = 'waiting';
-    room.message = 'Waiting for the second player to scan or open the invite link.';
+    room.message =
+      room.playerCount === 2
+        ? 'Waiting for the second player to scan or open the invite link.'
+        : `Waiting for players (${readyCount}/${room.playerCount} ready)...`;
     broadcastRoom(room);
   }
 }
@@ -236,11 +692,15 @@ async function main(): Promise<void> {
   app.use(express.json());
 
   app.post('/api/rooms', (req, res) => {
-    const body = req.body && typeof req.body === 'object' ? (req.body as { hostName?: unknown; difficulty?: unknown }) : {};
-    const room = createRoom(body.hostName, body.difficulty);
+    const body =
+      req.body && typeof req.body === 'object'
+        ? (req.body as { hostName?: unknown; difficulty?: unknown; playerCount?: unknown })
+        : {};
+    const room = createRoom(body.hostName, body.difficulty, body.playerCount);
     res.status(201).json({
       roomId: room.roomId,
       token: room.token,
+      playerCount: room.playerCount,
     });
   });
 
@@ -255,11 +715,14 @@ async function main(): Promise<void> {
       res.status(403).json({ error: 'Invalid invite token.' });
       return;
     }
+    const joinedCount = room.seats.filter((s) => s.clientId !== null).length;
     res.json({
       roomId: room.roomId,
-      hostName: room.hostName,
+      hostName: room.seats[0]?.name ?? 'Host',
       difficulty: room.difficulty,
-      guestJoined: room.guestClientId !== null,
+      playerCount: room.playerCount,
+      joinedCount,
+      guestJoined: joinedCount >= 2,
     });
   });
 
@@ -268,7 +731,7 @@ async function main(): Promise<void> {
 
   wss.on('connection', (ws) => {
     let boundRoomId: string | null = null;
-    let boundRole: PlayerRole | null = null;
+    let boundSeatIndex: number | null = null;
     let boundClientId: string | null = null;
 
     ws.on('message', (raw) => {
@@ -301,50 +764,81 @@ async function main(): Promise<void> {
           return;
         }
 
-        let role: PlayerRole | null = null;
-        if (room.hostClientId === clientId || room.hostClientId === null) {
-          role = 'host';
-          room.hostClientId = clientId;
-          room.hostWs = ws;
-          room.hostName = sanitizeName(action.name, room.hostName);
-        } else if (room.guestClientId === clientId || room.guestClientId === null) {
-          const isFirstGuestJoin = room.guestClientId === null;
-          role = 'guest';
-          room.guestClientId = clientId;
-          room.guestWs = ws;
-          room.guestName = sanitizeName(action.name, 'Player 2');
-
-          if (isFirstGuestJoin) {
-            if (room.turn === 'waiting') {
-              room.turn = 'host';
-              room.message = `${room.guestName} joined! ${room.hostName}'s turn.`;
-            }
-          }
+        let targetSeat = room.seats.find((s) => s.clientId === clientId) ?? null;
+        let isFirstSeatJoin = false;
+        if (targetSeat) {
+          targetSeat.ws = ws;
+          targetSeat.isCpu = false;
+          targetSeat.name = sanitizeName(
+            action.name,
+            targetSeat.index === 0 ? 'Host' : `Player ${targetSeat.index + 1}`
+          );
         } else {
-          sendError(ws, 'This room already has two players.');
-          return;
+          const openSeat = room.seats.find((s) => s.clientId === null && !s.isCpu) ?? null;
+          if (!openSeat) {
+            sendError(ws, `This ${room.playerCount}-player room is already full.`);
+            return;
+          }
+          isFirstSeatJoin = true;
+          openSeat.clientId = clientId;
+          openSeat.ws = ws;
+          openSeat.isCpu = false;
+          openSeat.name = sanitizeName(
+            action.name,
+            openSeat.index === 0 ? 'Host' : `Player ${openSeat.index + 1}`
+          );
+          targetSeat = openSeat;
         }
 
         boundRoomId = room.roomId;
-        boundRole = role;
+        boundSeatIndex = targetSeat.index;
         boundClientId = clientId;
 
-        if (role === 'guest' && room.turn === 'host' && room.discard.length === 1 && room.hostHand.length >= 7) {
-          const joinBanner: EffectEvent = {
-            kind: 'banner',
-            text: `${room.guestName.toUpperCase()} JOINED`,
-            color: '#f5c84b',
-            size: 0.6,
-            dur: 1.1,
-          };
-          broadcastRoom(room, [joinBanner], [{ kind: 'deal', isJasirBoost: false, difficulty: room.difficulty }]);
+        const joinedCount = room.seats.filter((s) => s.clientId !== null || s.isCpu).length;
+        if (room.turn === 'waiting') {
+          if (joinedCount >= room.playerCount) {
+            room.turn = 'host';
+            room.turnIndex = 0;
+            const hostSeat = room.seats[0];
+            room.message = `All ${room.playerCount} players joined! ${hostSeat.name}'s turn.`;
+            const joinerName = targetSeat.name;
+            broadcastRoom(room, (seatIdx) => [
+              seatIdx === 0
+                ? {
+                    kind: 'banner',
+                    text: `${joinerName.toUpperCase()} JOINED`,
+                    color: '#f5c84b',
+                    size: 0.6,
+                    dur: 1.1,
+                  }
+                : { kind: 'deal', isJasirBoost: false, difficulty: room.difficulty },
+            ]);
+          } else {
+            room.message =
+              room.playerCount === 2
+                ? 'Waiting for the second player to scan or open the invite link.'
+                : `${targetSeat.name} joined (${joinedCount}/${room.playerCount} ready).`;
+            broadcastRoom(room);
+          }
         } else {
-          broadcastRoom(room);
+          broadcastRoom(room, (seatIdx) =>
+            isFirstSeatJoin && seatIdx !== targetSeat.index
+              ? [
+                  {
+                    kind: 'banner',
+                    text: `${targetSeat.name.toUpperCase()} JOINED`,
+                    color: '#f5c84b',
+                    size: 0.52,
+                    dur: 1.0,
+                  },
+                ]
+              : []
+          );
         }
         return;
       }
 
-      if (!boundRoomId || !boundRole || !boundClientId) {
+      if (boundRoomId === null || boundSeatIndex === null || !boundClientId) {
         sendError(ws, 'Join a room first.');
         return;
       }
@@ -353,87 +847,74 @@ async function main(): Promise<void> {
         sendError(ws, 'Room closed.');
         return;
       }
+      const activeSeat = room.seats[boundSeatIndex];
+      if (!activeSeat) return;
 
       if (action.type === 'rename') {
-        const nextName = sanitizeName(action.name, boundRole === 'host' ? 'Host' : 'Player 2');
-        if (boundRole === 'host') {
-          room.hostName = nextName;
-        } else {
-          room.guestName = nextName;
-        }
+        activeSeat.name = sanitizeName(
+          action.name,
+          activeSeat.index === 0 ? 'Host' : `Player ${activeSeat.index + 1}`
+        );
         broadcastRoom(room);
+        return;
+      }
+
+      if (action.type === 'start_now') {
+        if (boundSeatIndex !== 0) {
+          sendError(ws, 'Only the host can start early with CPUs.');
+          return;
+        }
+        if (room.turn !== 'waiting') return;
+        startFreshRound(room, undefined, true);
         return;
       }
 
       if (action.type === 'restart') {
         const nextDiff = isDifficultyLevel(action.difficulty) ? action.difficulty : undefined;
-        startFreshRound(room, nextDiff);
+        startFreshRound(room, nextDiff, false);
         return;
       }
 
-      if (room.winner !== null || room.turn === 'waiting' || room.turn === 'over') {
+      if (room.winnerIndex !== null || room.turn === 'waiting' || room.turn === 'over') {
         return;
       }
-      if (room.turn !== boundRole) {
+      if (room.turnIndex !== boundSeatIndex || activeSeat.eliminated) {
         sendError(ws, 'Wait for your turn.');
         return;
       }
 
-      const activeHand = boundRole === 'host' ? room.hostHand : room.guestHand;
-      const opponentHand = boundRole === 'host' ? room.guestHand : room.hostHand;
-      const opponentRole: PlayerRole = boundRole === 'host' ? 'guest' : 'host';
-      const activeName = boundRole === 'host' ? room.hostName : room.guestName;
-      const opponentName = boundRole === 'host' ? room.guestName : room.hostName;
-
       if (action.type === 'call_uno') {
-        if (activeHand.length < 2) return;
-        const alreadyArmed = boundRole === 'host' ? room.hostUnoArmed : room.guestUnoArmed;
-        if (alreadyArmed) return;
-        if (boundRole === 'host') room.hostUnoArmed = true;
-        else room.guestUnoArmed = true;
-        room.message = `${activeName} called UNO! Play your card.`;
-        broadcastRoom(
-          room,
-          [{ kind: 'uno', whoName: activeName, isSelf: boundRole === 'host' }],
-          [{ kind: 'uno', whoName: activeName, isSelf: boundRole === 'guest' }]
-        );
+        if (activeSeat.hand.length < 2 || activeSeat.unoArmed) return;
+        activeSeat.unoArmed = true;
+        room.message = `${activeSeat.name} called UNO! Play your card.`;
+        broadcastRoom(room, (seatIdx) => [
+          { kind: 'uno', whoName: activeSeat.name, isSelf: seatIdx === activeSeat.index },
+        ]);
         return;
       }
 
       if (action.type === 'draw') {
-        if (boundRole === 'host') room.hostUnoArmed = false;
-        else room.guestUnoArmed = false;
+        activeSeat.unoArmed = false;
 
-        // Accepting a No Mercy draw stack
         if (room.pendingDrawStack > 0) {
           const stackCount = room.pendingDrawStack;
-          let reshuffledAny = false;
+          const effs: EffectEvent[] = [];
           for (let i = 0; i < stackCount; i++) {
-            const res = drawOneFromDeck(room.deck, room.discard, activeHand);
-            if (res.reshuffled) reshuffledAny = true;
+            const res = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
+            if (res.reshuffled) effs.push({ kind: 'reshuffle' });
           }
           room.pendingDrawStack = 0;
           room.pendingDrawMin = 0;
           room.drawnUid = null;
-          const hostEffects: EffectEvent[] = reshuffledAny ? [{ kind: 'reshuffle' }] : [];
-          const guestEffects: EffectEvent[] = reshuffledAny ? [{ kind: 'reshuffle' }] : [];
 
-          if (room.difficulty === 'no_mercy' && activeHand.length >= MERCY_HAND_LIMIT) {
-            room.winner = opponentRole;
-            room.turn = 'over';
-            room.score[opponentRole] += 1;
-            room.message = `MERCY KO! ${activeName} reached ${activeHand.length} cards.`;
-            hostEffects.push({ kind: 'mercy_ko', loserName: activeName, isSelfLoser: boundRole === 'host' });
-            guestEffects.push({ kind: 'mercy_ko', loserName: activeName, isSelfLoser: boundRole === 'guest' });
-            hostEffects.push({ kind: 'win', winnerRole: opponentRole });
-            guestEffects.push({ kind: 'win', winnerRole: opponentRole });
-            broadcastRoom(room, hostEffects, guestEffects);
-            return;
-          }
+          if (handleMercyKnockout(room, activeSeat, effs)) return;
 
-          room.turn = opponentRole;
-          room.message = `${activeName} drew ${stackCount} cards! ${opponentName}'s turn.`;
-          broadcastRoom(room, hostEffects, guestEffects);
+          room.turnIndex = advanceTurn(room, 1);
+          room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+          const nextSeat = room.seats[room.turnIndex];
+          room.message = `${activeSeat.name} drew ${stackCount} cards! ${nextSeat.name}'s turn.`;
+          broadcastRoom(room, () => effs);
+          scheduleCpuIfNeeded(room);
           return;
         }
 
@@ -441,65 +922,50 @@ async function main(): Promise<void> {
           sendError(ws, 'You already drew a card this turn — play it or pass.');
           return;
         }
-        const { card, reshuffled } = drawOneFromDeck(room.deck, room.discard, activeHand);
+        const { card, reshuffled } = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
         const effects: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
 
-        if (room.difficulty === 'no_mercy' && activeHand.length >= MERCY_HAND_LIMIT) {
-          room.winner = opponentRole;
-          room.turn = 'over';
-          room.score[opponentRole] += 1;
-          room.message = `MERCY KO! ${activeName} reached ${activeHand.length} cards.`;
-          const hostEffs: EffectEvent[] = [
-            ...effects,
-            { kind: 'mercy_ko', loserName: activeName, isSelfLoser: boundRole === 'host' },
-            { kind: 'win', winnerRole: opponentRole },
-          ];
-          const guestEffs: EffectEvent[] = [
-            ...effects,
-            { kind: 'mercy_ko', loserName: activeName, isSelfLoser: boundRole === 'guest' },
-            { kind: 'win', winnerRole: opponentRole },
-          ];
-          broadcastRoom(room, hostEffs, guestEffs);
-          return;
-        }
+        if (handleMercyKnockout(room, activeSeat, effects)) return;
 
         if (!card) {
-          room.turn = opponentRole;
+          room.turnIndex = advanceTurn(room, 1);
+          room.turn = room.turnIndex === 0 ? 'host' : 'guest';
           room.drawnUid = null;
-          room.message = `Deck empty — turn passes to ${opponentName}.`;
-          broadcastRoom(room, effects, effects);
+          const nextSeat = room.seats[room.turnIndex];
+          room.message = `Deck empty — turn passes to ${nextSeat.name}.`;
+          broadcastRoom(room, () => effects);
+          scheduleCpuIfNeeded(room);
           return;
         }
         const top = room.discard[room.discard.length - 1];
-        if (canPlayCard(card, top, room.currentColor)) {
-          room.drawnUid = card.uid;
-          room.message = `${activeName} drew a playable card — play it or pass.`;
-        } else {
-          room.drawnUid = card.uid;
-          room.message = `${activeName} drew a card with no match — pass turn.`;
-        }
-        broadcastRoom(room, effects, effects);
+        room.drawnUid = card.uid;
+        room.message = canPlayCard(card, top, room.currentColor)
+          ? `${activeSeat.name} drew a playable card — play it or pass.`
+          : `${activeSeat.name} drew a card with no match — pass turn.`;
+        broadcastRoom(room, () => effects);
         return;
       }
 
       if (action.type === 'pass') {
         if (room.drawnUid === null || room.pendingDrawStack > 0) return;
         room.drawnUid = null;
-        if (boundRole === 'host') room.hostUnoArmed = false;
-        else room.guestUnoArmed = false;
-        room.turn = opponentRole;
-        room.message = `${opponentName}'s turn — color is ${room.currentColor}.`;
+        activeSeat.unoArmed = false;
+        room.turnIndex = advanceTurn(room, 1);
+        room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+        const nextSeat = room.seats[room.turnIndex];
+        room.message = `${nextSeat.name}'s turn — color is ${room.currentColor}.`;
         broadcastRoom(room);
+        scheduleCpuIfNeeded(room);
         return;
       }
 
       if (action.type === 'play') {
-        const cardIndex = activeHand.findIndex((c) => c.uid === action.uid);
+        const cardIndex = activeSeat.hand.findIndex((c) => c.uid === action.uid);
         if (cardIndex === -1) {
           sendError(ws, 'Card not in hand.');
           return;
         }
-        const card = activeHand[cardIndex];
+        const card = activeSeat.hand[cardIndex];
         if (room.drawnUid !== null && card.uid !== room.drawnUid) {
           sendError(ws, 'Play the card you just drew, or pass.');
           return;
@@ -525,141 +991,17 @@ async function main(): Promise<void> {
           nextColor = card.color;
         }
 
-        const wasUnoArmed = boundRole === 'host' ? room.hostUnoArmed : room.guestUnoArmed;
-        if (boundRole === 'host') room.hostUnoArmed = false;
-        else room.guestUnoArmed = false;
-
-        activeHand.splice(cardIndex, 1);
-
-        const hostEffects: EffectEvent[] = [];
-        const guestEffects: EffectEvent[] = [];
-
-        if (card.value === 'Dump' && card.color !== 'Wild') {
-          const extras: Card[] = [];
-          for (let i = activeHand.length - 1; i >= 0; i--) {
-            if (activeHand[i].color === card.color) {
-              const [matched] = activeHand.splice(i, 1);
-              extras.push(matched);
-            }
-          }
-          room.discard.push(...extras);
-          hostEffects.push({ kind: 'dump', whoName: activeName, color: nextColor, count: extras.length + 1 });
-          guestEffects.push({ kind: 'dump', whoName: activeName, color: nextColor, count: extras.length + 1 });
-        }
-
-        room.discard.push(card);
-        room.currentColor = nextColor;
-        room.drawnUid = null;
-
-        hostEffects.push({ kind: 'impact', card, activeColor: nextColor });
-        guestEffects.push({ kind: 'impact', card, activeColor: nextColor });
-
-        if (activeHand.length === 0) {
-          room.pendingDrawStack = 0;
-          room.pendingDrawMin = 0;
-          room.winner = boundRole;
-          room.turn = 'over';
-          room.score[boundRole] += 1;
-          room.message = `${activeName} wins the round!`;
-          hostEffects.push({ kind: 'win', winnerRole: boundRole });
-          guestEffects.push({ kind: 'win', winnerRole: boundRole });
-          broadcastRoom(room, hostEffects, guestEffects);
-          return;
-        }
-
-        let penalizedUno = false;
-        if (activeHand.length === 1) {
-          if (wasUnoArmed) {
-            hostEffects.push({ kind: 'uno', whoName: activeName, isSelf: boundRole === 'host' });
-            guestEffects.push({ kind: 'uno', whoName: activeName, isSelf: boundRole === 'guest' });
-          } else {
-            penalizedUno = true;
-            for (let i = 0; i < 2; i++) {
-              const res = drawOneFromDeck(room.deck, room.discard, activeHand);
-              if (res.reshuffled) {
-                hostEffects.push({ kind: 'reshuffle' });
-                guestEffects.push({ kind: 'reshuffle' });
-              }
-            }
-            hostEffects.push({ kind: 'uno_penalty', whoName: activeName, isSelf: boundRole === 'host' });
-            guestEffects.push({ kind: 'uno_penalty', whoName: activeName, isSelf: boundRole === 'guest' });
-          }
-        }
-
-        const drawAmount = getDrawAmount(card);
-        if (drawAmount > 0) {
-          if (room.difficulty === 'no_mercy') {
-            room.pendingDrawStack += drawAmount;
-            room.pendingDrawMin = drawAmount;
-            room.turn = opponentRole;
-            room.message = penalizedUno
-              ? `${activeName} forgot UNO (+2)! ${opponentName}: stack +${drawAmount}+ or take ${room.pendingDrawStack}!`
-              : `${opponentName}: stack a +${drawAmount}+ card or take +${room.pendingDrawStack} cards!`;
-          } else {
-            let reshuffledAny = false;
-            for (let i = 0; i < drawAmount; i++) {
-              const res = drawOneFromDeck(room.deck, room.discard, opponentHand);
-              if (res.reshuffled) reshuffledAny = true;
-            }
-            if (reshuffledAny) {
-              hostEffects.push({ kind: 'reshuffle' });
-              guestEffects.push({ kind: 'reshuffle' });
-            }
-            room.turn = boundRole;
-            room.message = penalizedUno
-              ? `${activeName} forgot UNO (+2), and ${opponentName} draws ${drawAmount}!`
-              : `${opponentName} draws ${drawAmount}! ${activeName} plays again (${nextColor}).`;
-          }
-        } else if (card.value === 'Roulette') {
-          const rRes = drawColorRoulette(room.deck, room.discard, opponentHand, nextColor);
-          if (rRes.reshuffled) {
-            hostEffects.push({ kind: 'reshuffle' });
-            guestEffects.push({ kind: 'reshuffle' });
-          }
-          hostEffects.push({ kind: 'roulette', whoName: opponentName, color: nextColor, drawnCount: rRes.drawnCount });
-          guestEffects.push({ kind: 'roulette', whoName: opponentName, color: nextColor, drawnCount: rRes.drawnCount });
-
-          if (room.difficulty === 'no_mercy' && opponentHand.length >= MERCY_HAND_LIMIT) {
-            room.winner = boundRole;
-            room.turn = 'over';
-            room.score[boundRole] += 1;
-            room.message = `MERCY KO! ${opponentName} hit ${opponentHand.length} cards!`;
-            hostEffects.push({ kind: 'mercy_ko', loserName: opponentName, isSelfLoser: opponentRole === 'host' });
-            guestEffects.push({ kind: 'mercy_ko', loserName: opponentName, isSelfLoser: opponentRole === 'guest' });
-            hostEffects.push({ kind: 'win', winnerRole: boundRole });
-            guestEffects.push({ kind: 'win', winnerRole: boundRole });
-            broadcastRoom(room, hostEffects, guestEffects);
-            return;
-          }
-
-          room.turn = boundRole;
-          room.message = `${opponentName} drew ${rRes.drawnCount} in Color Roulette! ${activeName} goes again.`;
-        } else if (card.value === 'Skip' || card.value === 'Reverse' || card.value === 'Skip All') {
-          room.turn = boundRole;
-          room.message = penalizedUno
-            ? `${activeName} forgot UNO (+2)! Still ${activeName}'s turn.`
-            : `${opponentName} skipped! ${activeName} plays again.`;
-        } else {
-          room.turn = opponentRole;
-          room.message = penalizedUno
-            ? `${activeName} forgot UNO (+2)! ${opponentName}'s turn (${nextColor}).`
-            : activeHand.length === 1
-              ? `${activeName} called UNO! ${opponentName}'s turn (${nextColor}).`
-              : `${opponentName}'s turn — color is ${nextColor}.`;
-        }
-
-        broadcastRoom(room, hostEffects, guestEffects);
+        commitSeatPlay(room, activeSeat, cardIndex, nextColor);
       }
     });
 
     ws.on('close', () => {
-      if (!boundRoomId || !boundRole) return;
+      if (!boundRoomId || boundSeatIndex === null) return;
       const room = rooms.get(boundRoomId);
       if (!room) return;
-      if (boundRole === 'host' && room.hostWs === ws) {
-        room.hostWs = null;
-      } else if (boundRole === 'guest' && room.guestWs === ws) {
-        room.guestWs = null;
+      const seat = room.seats[boundSeatIndex];
+      if (seat && seat.ws === ws) {
+        seat.ws = null;
       }
       broadcastRoom(room);
     });

@@ -355,10 +355,12 @@ export class PunoCanvasEngine {
     this.cx = this.width / 2;
     this.tableRect = [padX, topY, this.width - padX, Math.max(topY + 210, this.height - bottomReserve)];
 
-    const oppBottom =
-      topY + (compact ? 28 : 34) + 5 + (BASE_H / 2) * this.opponentScale;
+    const multiOpp = (this.view?.playerCount ?? 2) > 2;
+    const oppBottom = multiOpp
+      ? topY + (compact ? 62 : 76)
+      : topY + (compact ? 28 : 34) + 5 + (BASE_H / 2) * this.opponentScale;
     const labelOffset = 84 * (this.pileScale / 1.2);
-    const minCy = oppBottom + labelOffset + (compact ? 26 : 34);
+    const minCy = oppBottom + labelOffset + (compact ? 26 : 36);
     const midCy = (this.tableRect[1] + this.tableRect[3]) / 2 + (compact ? 6 : 8);
     this.cy = Math.max(midCy, minCy);
   }
@@ -373,6 +375,7 @@ export class PunoCanvasEngine {
 
   public syncView(view: ClientGameView, effects: EffectEvent[]): void {
     const roundChanged = view.roundId !== this.lastRoundId;
+    const countChanged = (this.view?.playerCount ?? 2) !== view.playerCount;
     if (roundChanged) {
       this.sprites.clear();
       this.particles = [];
@@ -384,6 +387,9 @@ export class PunoCanvasEngine {
     }
     this.view = view;
     this.targetColor = view.currentColor;
+    if (countChanged) {
+      this.resize(this.width, this.height);
+    }
 
     const [dx, dy] = this.deckPos();
     const keepIds = new Set<number>();
@@ -1147,6 +1153,7 @@ export class PunoCanvasEngine {
     this.drawTable(ctx);
     this.drawDustMotes(ctx);
     this.drawPiles(ctx);
+    this.drawMultiOpponents(ctx);
     this.drawCards(ctx);
     this.drawParticles(ctx);
     this.drawBanners(ctx);
@@ -1271,18 +1278,20 @@ export class PunoCanvasEngine {
     // Rotating orbital arcs + orbiting sparkles around discard pile
     const [px, py] = this.pilePos();
     const arcR = 90 * (this.pileScale / 1.2);
+    const dir = this.view?.direction ?? 1;
     ctx.lineWidth = 3;
     ctx.strokeStyle = g;
     for (let i = 0; i < 3; i++) {
-      const startDeg = (this.t * 78 + i * 120) % 360;
+      const startDeg = (this.t * 78 * dir + i * 120 + 3600) % 360;
       const start = (startDeg * Math.PI) / 180;
       const extent = (62 * Math.PI) / 180;
       ctx.beginPath();
       ctx.arc(px, py, arcR, start, start + extent);
       ctx.stroke();
 
-      const sx = px + Math.cos(start + extent) * arcR;
-      const sy = py + Math.sin(start + extent) * arcR;
+      const tipAngle = dir === 1 ? start + extent : start;
+      const sx = px + Math.cos(tipAngle) * arcR;
+      const sy = py + Math.sin(tipAngle) * arcR;
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
       ctx.arc(sx, sy, 2.3, 0, Math.PI * 2);
@@ -1291,10 +1300,137 @@ export class PunoCanvasEngine {
 
     ctx.lineWidth = 2;
     ctx.strokeStyle = mixHex(th.feltMid, g, 0.55);
-    const outerStart = ((-this.t * 45) * Math.PI) / 180;
+    const outerStart = ((-this.t * 45 * dir) * Math.PI) / 180;
     ctx.beginPath();
     ctx.arc(px, py, arcR + 10, outerStart, outerStart + (34 * Math.PI) / 180);
     ctx.stroke();
+  }
+
+  private drawMultiOpponents(ctx: CanvasRenderingContext2D): void {
+    const view = this.view;
+    if (!view || view.playerCount <= 2 || !view.seats || view.seats.length <= 2) return;
+
+    const total = view.seats.length;
+    const oppSeats = [];
+    for (let offset = 1; offset < total; offset++) {
+      oppSeats.push(view.seats[(view.selfIndex + offset) % total]);
+    }
+    const nOpp = oppSeats.length;
+    const compact = this.width < 680;
+    const [l, t, r, b] = this.tableRect;
+    const mx = (l + r) / 2;
+    const spanX = Math.max(120, (r - l) / 2 - (compact ? 42 : 76));
+    const dropY = Math.max(40, (b - t) * (compact ? 0.25 : 0.34));
+    const miniScale = compact
+      ? nOpp >= 6
+        ? 0.24
+        : 0.3
+      : nOpp >= 7
+        ? 0.32
+        : nOpp >= 4
+          ? 0.37
+          : 0.42;
+    const minDeg = nOpp >= 6 ? -170 : -148;
+    const maxDeg = nOpp >= 6 ? -10 : -32;
+
+    oppSeats.forEach((seat, k) => {
+      const frac = nOpp > 1 ? k / (nOpp - 1) : 0.5;
+      const deg = minDeg + frac * (maxDeg - minDeg);
+      const rad = (deg * Math.PI) / 180;
+
+      const seatX = mx + Math.cos(rad) * spanX;
+      const stagger = compact && nOpp >= 6 && k % 2 === 1 ? 14 : 0;
+      const seatY = t + (compact ? 30 : 38) + (1 - Math.abs(Math.sin(rad))) * dropY + stagger;
+      const isTurn = view.turnIndex === seat.index && view.turn !== 'over';
+
+      if (!seat.eliminated) {
+        const shownCards = Math.min(seat.cardCount, nOpp >= 7 ? 3 : 4);
+        const step = (compact ? 7 : 10) * (miniScale / 0.36);
+        for (let c = 0; c < shownCards; c++) {
+          const off = c - (shownCards - 1) / 2;
+          const cx = seatX + off * step;
+          const cy = seatY + Math.abs(off) * 1.4;
+          const ang = off * 7;
+          this.drawCard(
+            ctx,
+            null,
+            cx,
+            cy,
+            ang,
+            miniScale,
+            0,
+            seat.connected ? 0 : 0.45,
+            isTurn && c === shownCards - 1 ? 0.8 : 0,
+            this.theme.accent,
+            0,
+            false
+          );
+        }
+      }
+
+      // Seat nameplate below mini hand
+      const plateY = seatY + (BASE_H / 2) * miniScale + (compact ? 12 : 14);
+      const plateW = compact ? (nOpp >= 6 ? 68 : 84) : nOpp >= 7 ? 94 : 112;
+      const plateH = compact ? 20 : 22;
+
+      ctx.save();
+      ctx.fillStyle = isTurn
+        ? mixHex(this.theme.surface, this.theme.accent, 0.22)
+        : 'rgba(9, 15, 22, 0.84)';
+      ctx.strokeStyle = seat.eliminated
+        ? '#64748b'
+        : isTurn
+          ? this.theme.accent
+          : seat.cardCount === 1
+            ? '#f43f5e'
+            : this.theme.surfaceBorder;
+      ctx.lineWidth = isTurn ? 1.8 : 1.1;
+      this.roundRectPath(ctx, seatX - plateW / 2, plateY - plateH / 2, plateW, plateH, 8);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const fontPx = compact ? (nOpp >= 6 ? 9 : 10) : 11;
+      ctx.font = `700 ${fontPx}px "Plus Jakarta Sans", sans-serif`;
+
+      const statusText = seat.eliminated
+        ? 'KO'
+        : !seat.connected
+          ? 'WAIT'
+          : seat.cardCount === 1
+            ? 'UNO!'
+            : String(seat.cardCount);
+      const maxChars = compact && nOpp >= 6 ? 5 : 8;
+      const shortName =
+        seat.name.length > maxChars ? `${seat.name.slice(0, maxChars - 1)}…` : seat.name;
+      const label = `${shortName} · ${statusText}`;
+
+      ctx.fillStyle = seat.eliminated
+        ? '#94a3b8'
+        : seat.cardCount === 1
+          ? '#fda4af'
+          : isTurn
+            ? this.theme.accent
+            : '#eef4f2';
+      ctx.fillText(label, seatX, plateY + 0.5, plateW - 10);
+      ctx.restore();
+    });
+
+    // Subtle direction indicator between piles when 3+ players are active
+    const [dx] = this.deckPos();
+    const [px, py] = this.pilePos();
+    const midX = (dx + px) / 2;
+    const dirY = py + 84 * (this.pileScale / 1.2) + 28;
+    if (dirY < this.height - 230) {
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '700 11px "Plus Jakarta Sans", sans-serif';
+      ctx.fillStyle = 'rgba(225, 236, 234, 0.72)';
+      ctx.fillText(view.direction === 1 ? '↻ CLOCKWISE' : '↺ COUNTER-CW', midX, dirY);
+      ctx.restore();
+    }
   }
 
   private drawPiles(ctx: CanvasRenderingContext2D): void {

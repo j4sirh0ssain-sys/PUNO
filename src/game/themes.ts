@@ -239,3 +239,208 @@ export const THEME_LIST: TableTheme[] = [
   TABLE_THEMES.pharaoh,
   TABLE_THEMES.aurora,
 ];
+
+export type WinParticleShape = 'rect' | 'coin' | 'diamond' | 'shard' | 'petal';
+export type WinEmblemKind =
+  | 'sparkles'
+  | 'crown'
+  | 'diamond'
+  | 'zap'
+  | 'flower'
+  | 'sun'
+  | 'prism';
+
+export interface ThemeWinMilestoneSpec {
+  title: string;
+  subtitle: string;
+  accent: string;
+  secondary: string;
+  particleShape: WinParticleShape;
+  ringSides: number; // 0 = circle, 4 = diamond, 5 = pentagon, 6 = hex, 8 = octagon
+  emblem: WinEmblemKind;
+}
+
+export const THEME_WIN_SPECS: Record<TableThemeId, Record<1 | 5 | 10, ThemeWinMilestoneSpec>> = {
+  emerald: {
+    1: {
+      title: 'First Stakes · Monte Carlo',
+      subtitle: 'Opening pot claimed on the emerald Riviera felt.',
+      accent: '#f5c84b',
+      secondary: '#16b07a',
+      particleShape: 'coin',
+      ringSides: 0,
+      emblem: 'sparkles',
+    },
+    5: {
+      title: 'High Roller · 5 Wins',
+      subtitle: 'Five golden chips stacked in Riviera championship style.',
+      accent: '#fbbf24',
+      secondary: '#34d399',
+      particleShape: 'coin',
+      ringSides: 0,
+      emblem: 'sparkles',
+    },
+    10: {
+      title: 'Monte Carlo Sovereign · 10 Wins',
+      subtitle: 'Ten gleaming victories — master of the VIP salon.',
+      accent: '#fde047',
+      secondary: '#16b07a',
+      particleShape: 'coin',
+      ringSides: 0,
+      emblem: 'crown',
+    },
+  },
+  burgundy: {
+    1: {
+      title: 'Opening Night · Velvet Noir',
+      subtitle: 'A debut triumph beneath the crimson velvet chandelier.',
+      accent: '#f3cf7a',
+      secondary: '#c8263b',
+      particleShape: 'diamond',
+      ringSides: 4,
+      emblem: 'diamond',
+    },
+    5: {
+      title: 'Velvet Headliner · 5 Wins',
+      subtitle: 'Five Art Deco encores on the crimson grand stage.',
+      accent: '#eec774',
+      secondary: '#fb7185',
+      particleShape: 'diamond',
+      ringSides: 4,
+      emblem: 'diamond',
+    },
+    10: {
+      title: 'Noir Grandmaster · 10 Wins',
+      subtitle: 'Ten gilded triumphs in timeless cabaret luxury.',
+      accent: '#ffe29c',
+      secondary: '#c8263b',
+      particleShape: 'diamond',
+      ringSides: 4,
+      emblem: 'crown',
+    },
+  },
+  obsidian: {
+    1: {
+      title: 'System Breach · Cyber Eclipse',
+      subtitle: 'First firewall cracked — eclipse grid unlocked.',
+      accent: '#38bdf8',
+      secondary: '#0ea5e9',
+      particleShape: 'shard',
+      ringSides: 6,
+      emblem: 'zap',
+    },
+    5: {
+      title: 'Overclocked · 5 Wins',
+      subtitle: 'Five consecutive victories surging through the neural core.',
+      accent: '#7dd3fc',
+      secondary: '#10b981',
+      particleShape: 'shard',
+      ringSides: 6,
+      emblem: 'zap',
+    },
+    10: {
+      title: 'Apex Mainframe · 10 Wins',
+      subtitle: 'Ten wins — total dominion over the Cyber Eclipse.',
+      accent: '#38bdf8',
+      secondary: '#ff4766',
+      particleShape: 'shard',
+      ringSides: 6,
+      emblem: 'crown',
+    },
+  },
+  sakura: {
+    1: {
+      title: 'First Blossom · Kyoto Dusk',
+      subtitle: 'Your opening victory blooms beneath Kyoto twilight.',
+      accent: '#ff8ab0',
+      secondary: '#f43f6e',
+      particleShape: 'petal',
+      ringSides: 0,
+      emblem: 'flower',
+    },
+    5: {
+      title: 'Petal Tempest · 5 Wins',
+      subtitle: 'Five victories carried on a swirling sakura breeze.',
+      accent: '#ffb8ce',
+      secondary: '#f5a623',
+      particleShape: 'petal',
+      ringSides: 5,
+      emblem: 'flower',
+    },
+    10: {
+      title: 'Moonlit Shogun · 10 Wins',
+      subtitle: 'Ten sacred victories under the full Kyoto moon.',
+      accent: '#ffd6e5',
+      secondary: '#f43f6e',
+      particleShape: 'petal',
+      ringSides: 0,
+      emblem: 'crown',
+    },
+  },
+  pharaoh: {
+    1: {
+      title: "Seal Broken · Pharaoh's Vault",
+      subtitle: 'The first gilded chamber opens before you.',
+      accent: '#f5c242',
+      secondary: '#14b8a6',
+      particleShape: 'diamond',
+      ringSides: 8,
+      emblem: 'sun',
+    },
+    5: {
+      title: "Sun King's Favor · 5 Wins",
+      subtitle: 'Five solar victories etched in ancient lapis and gold.',
+      accent: '#fde08d',
+      secondary: '#e8483c',
+      particleShape: 'diamond',
+      ringSides: 8,
+      emblem: 'sun',
+    },
+    10: {
+      title: 'Ascended Pharaoh · 10 Wins',
+      subtitle: 'Ten immortal victories — sovereign of the Vault.',
+      accent: '#f5c242',
+      secondary: '#3b82f6',
+      particleShape: 'diamond',
+      ringSides: 8,
+      emblem: 'crown',
+    },
+  },
+  aurora: {
+    1: {
+      title: 'First Light · Nordic Aurora',
+      subtitle: 'The first polar ribbon shimmers across the glacial ice.',
+      accent: '#2ee6a6',
+      secondary: '#0ea5e9',
+      particleShape: 'shard',
+      ringSides: 4,
+      emblem: 'prism',
+    },
+    5: {
+      title: 'Aurora Borealis · 5 Wins',
+      subtitle: 'Five northern victories illuminating the polar horizon.',
+      accent: '#7ff5d0',
+      secondary: '#ec4899',
+      particleShape: 'shard',
+      ringSides: 4,
+      emblem: 'prism',
+    },
+    10: {
+      title: 'Aurora Sovereign · 10 Wins',
+      subtitle: 'Ten radiant wins at the zenith of the northern sky.',
+      accent: '#2ee6a6',
+      secondary: '#38bdf8',
+      particleShape: 'shard',
+      ringSides: 6,
+      emblem: 'crown',
+    },
+  },
+};
+
+export function getThemeWinSpec(
+  themeId: TableThemeId,
+  milestone: 1 | 5 | 10
+): ThemeWinMilestoneSpec {
+  return THEME_WIN_SPECS[themeId][milestone];
+}
+
