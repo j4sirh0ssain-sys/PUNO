@@ -16,9 +16,52 @@
       rel="stylesheet"
     />
   </head>
-  <body>
+  <body style="background-color:#101329;color:#f4f4ed;margin:0;">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      (function () {
+        var root = document.getElementById('root');
+        var bootErr = '';
+        function showFallback(reason) {
+          if (!root || root.childElementCount > 0) return;
+          var isRawSource = !!document.querySelector('script[src="/src/main.tsx"]');
+          var msg = isRawSource
+            ? 'This site is serving unbuilt source files instead of the compiled bundle. On GitHub, open Settings → Pages → Build and deployment → Source → select "GitHub Actions", then run the "Deploy PUNO to GitHub Pages" workflow.'
+            : reason || 'Unable to initialize the game script.';
+          root.innerHTML =
+            '<div style="min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:system-ui,-apple-system,sans-serif;text-align:center;background:#101329;color:#f4f4ed;">' +
+            '<div style="max-width:440px;background:#161d3a;border:1px solid #2b3561;border-radius:16px;padding:24px;">' +
+            '<h1 style="margin:0 0 8px;font-size:28px;font-weight:800;font-style:italic;color:#f5c84b;">PUNO</h1>' +
+            '<p id="puno-boot-msg" style="margin:0 0 16px;font-size:14px;line-height:1.5;color:#c7d4d2;"></p>' +
+            '<button type="button" onclick="window.location.reload()" style="padding:10px 18px;border-radius:10px;border:none;background:#f5c84b;color:#151c27;font-weight:700;cursor:pointer;">Reload</button>' +
+            '</div></div>';
+          var msgEl = document.getElementById('puno-boot-msg');
+          if (msgEl) msgEl.textContent = msg;
+        }
+        window.addEventListener('error', function (e) {
+          if (!bootErr && e && e.message) bootErr = String(e.message);
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          if (!bootErr && e && e.reason) bootErr = String(e.reason.message || e.reason);
+        });
+        var rawEntry = document.querySelector('script[src="/src/main.tsx"]');
+        if (rawEntry) {
+          rawEntry.addEventListener('error', function () {
+            showFallback('Failed to load unbuilt /src/main.tsx.');
+          });
+          if (/\.github\.io$/i.test(window.location.hostname)) {
+            setTimeout(function () { showFallback(bootErr); }, 800);
+            return;
+          }
+        }
+        setTimeout(function () {
+          if (root && root.childElementCount === 0 && bootErr) {
+            showFallback(bootErr);
+          }
+        }, 5000);
+      })();
+    </script>
   </body>
 </html>
 
