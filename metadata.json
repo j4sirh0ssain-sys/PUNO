@@ -1,0 +1,6 @@
+{
+  "name": "PUNO — Two-Player Card Game",
+  "description": "Animated two-player UNO-style card game with spring-physics cards, solo CPU mode, and real-time QR-code multiplayer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
