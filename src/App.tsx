@@ -88,19 +88,27 @@ interface SoloInternalState {
   roundId: number;
 }
 
-function getOrCreateClientId(scopeKey: string): string {
-  const storageKey = `puno-client-${scopeKey.toUpperCase()}`;
+let memoryFallbackClientId: string | null = null;
+
+function getOrCreateClientId(_scopeKey?: string): string {
+  const storageKey = 'puno-tab-client-id';
   try {
-    const existing = localStorage.getItem(storageKey);
+    const existing = sessionStorage.getItem(storageKey);
     if (existing) return existing;
     const generated =
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    localStorage.setItem(storageKey, generated);
+    sessionStorage.setItem(storageKey, generated);
     return generated;
   } catch {
-    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    if (!memoryFallbackClientId) {
+      memoryFallbackClientId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+    return memoryFallbackClientId;
   }
 }
 
@@ -366,8 +374,16 @@ function ShowcaseCard({
 
 export default function App() {
   const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
-  const inviteRoomParam = urlParams.get('room');
-  const inviteTokenParam = urlParams.get('token');
+  const inviteRoomParam = useMemo(() => {
+    const raw = urlParams.get('room');
+    const cleaned = raw ? raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') : '';
+    return cleaned || null;
+  }, [urlParams]);
+  const inviteTokenParam = useMemo(() => {
+    const raw = urlParams.get('token');
+    const cleaned = raw ? raw.trim() : '';
+    return cleaned || null;
+  }, [urlParams]);
   const isGuestInvite = Boolean(inviteRoomParam && inviteTokenParam);
 
   const [screen, setScreen] = useState<ScreenState>('TITLE_MENU');
@@ -442,6 +458,7 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<PunoCanvasEngine | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const joinTimeoutRef = useRef<number | null>(null);
   const activeJoinNameRef = useRef<string>(playerName);
   const modeRef = useRef<GameMode>(mode);
   const roomIdRef = useRef<string | null>(roomId);
@@ -1265,7 +1282,15 @@ export default function App() {
     socket.emit(type, payload);
   }, []);
 
+  const clearJoinTimeout = useCallback(() => {
+    if (joinTimeoutRef.current !== null) {
+      window.clearTimeout(joinTimeoutRef.current);
+      joinTimeoutRef.current = null;
+    }
+  }, []);
+
   const disconnectMultiplayer = useCallback(() => {
+    clearJoinTimeout();
     if (socketRef.current) {
       const oldSocket = socketRef.current;
       socketRef.current = null;
@@ -1273,12 +1298,14 @@ export default function App() {
       oldSocket.disconnect();
     }
     clearMultiplayerSession();
+    setRoomBusy(false);
     setWsStatus('idle');
     setNetworkError(null);
-  }, []);
+  }, [clearJoinTimeout]);
 
   const connectMultiplayer = useCallback(
     (targetRoomId: string, targetToken: string, joinName: string) => {
+      clearJoinTimeout();
       if (socketRef.current) {
         const oldSocket = socketRef.current;
         socketRef.current = null;
@@ -1286,14 +1313,16 @@ export default function App() {
         oldSocket.disconnect();
       }
 
-      const cleanRoomId = targetRoomId.trim().toUpperCase();
+      const cleanRoomId = targetRoomId.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const cleanToken = targetToken.trim();
       activeJoinNameRef.current = joinName;
-      saveMultiplayerSession({ roomId: cleanRoomId, token: targetToken, name: joinName });
+      saveMultiplayerSession({ roomId: cleanRoomId, token: cleanToken, name: joinName });
 
       let serverUrl: string | undefined;
       try {
         serverUrl = getSocketServerUrl();
       } catch (err) {
+        setRoomBusy(false);
         setWsStatus('idle');
         setNetworkError(
           err instanceof Error
@@ -1307,7 +1336,8 @@ export default function App() {
       const clientId = getOrCreateClientId(cleanRoomId);
 
       const socket = io(serverUrl, {
-        transports: ['websocket', 'polling'],
+        transports: ['polling', 'websocket'],
+        upgrade: true,
         reconnection: true,
         reconnectionAttempts: 20,
         reconnectionDelay: 1000,
@@ -1316,22 +1346,49 @@ export default function App() {
       });
       socketRef.current = socket;
       let wokeBackend = false;
+      let connectErrCount = 0;
+      let receivedState = false;
+
+      joinTimeoutRef.current = window.setTimeout(() => {
+        if (socketRef.current !== socket || receivedState) return;
+        setRoomBusy(false);
+        setNetworkError(
+          'Still waiting for the multiplayer room response. Check your connection or try joining again.'
+        );
+      }, 25000);
 
       socket.on('connect', () => {
         if (socketRef.current !== socket) return;
+        connectErrCount = 0;
         setWsStatus('connected');
         setNetworkError(null);
-        socket.emit('join', {
-          roomId: cleanRoomId,
-          token: targetToken,
-          clientId,
-          name: activeJoinNameRef.current,
-        });
+        socket.emit(
+          'join',
+          {
+            roomId: cleanRoomId,
+            token: cleanToken,
+            clientId,
+            name: activeJoinNameRef.current,
+          },
+          (ack?: { ok?: boolean; error?: string }) => {
+            if (socketRef.current !== socket) return;
+            if (ack && ack.ok === false) {
+              clearJoinTimeout();
+              setRoomBusy(false);
+              setNetworkError(ack.error || 'Could not join multiplayer room.');
+              soundFx.playError();
+            }
+          }
+        );
       });
 
       socket.on('state', (msg: { view: ClientGameView; effects: EffectEvent[] }) => {
         if (socketRef.current !== socket || !msg?.view) return;
+        receivedState = true;
+        clearJoinTimeout();
+        setRoomBusy(false);
         setNetworkError(null);
+        setMode('multiplayer');
         setMultiView(msg.view);
         setScreen(msg.view.turn === 'over' ? 'GAME_OVER' : 'PLAYING');
         if (msg.view.turn !== 'over') {
@@ -1357,16 +1414,24 @@ export default function App() {
 
       socket.on('game_error', (payload: { message?: string }) => {
         if (socketRef.current !== socket) return;
+        clearJoinTimeout();
+        setRoomBusy(false);
         setNetworkError(payload?.message || 'Multiplayer error.');
         soundFx.playError();
       });
 
-      socket.on('connect_error', () => {
+      socket.on('connect_error', (err) => {
         if (socketRef.current !== socket) return;
+        connectErrCount += 1;
         setWsStatus('reconnecting');
         if (!wokeBackend) {
           wokeBackend = true;
           void wakeBackendServer();
+        }
+        if (!receivedState && connectErrCount >= 2) {
+          setRoomBusy(false);
+          const detail = err instanceof Error && err.message ? ` (${err.message})` : '';
+          setNetworkError(`Connecting to multiplayer server${detail} — retrying...`);
         }
       });
 
@@ -1375,8 +1440,9 @@ export default function App() {
         const shouldStay =
           modeRef.current === 'multiplayer' &&
           roomIdRef.current?.toUpperCase() === cleanRoomId &&
-          roomTokenRef.current === targetToken;
+          roomTokenRef.current === cleanToken;
         if (!shouldStay || reason === 'io client disconnect') {
+          clearJoinTimeout();
           setWsStatus('idle');
           return;
         }
@@ -1390,20 +1456,26 @@ export default function App() {
 
       socket.io.on('reconnect_failed', () => {
         if (socketRef.current !== socket) return;
+        clearJoinTimeout();
+        setRoomBusy(false);
         setWsStatus('idle');
         setNetworkError(
           'Unable to reach the multiplayer server right now. Check your connection or try again.'
         );
       });
     },
-    [playSoundForEffects, recordSelfWin]
+    [clearJoinTimeout, playSoundForEffects, recordSelfWin]
   );
 
   // Resume active multiplayer session on page reload (unless opening a new invite link)
   useEffect(() => {
-    if (isGuestInvite) return;
     const saved = loadMultiplayerSession();
     if (!saved) return;
+    if (isGuestInvite) {
+      if (saved.roomId !== inviteRoomParam || saved.token !== inviteTokenParam) {
+        return;
+      }
+    }
     modeRef.current = 'multiplayer';
     roomIdRef.current = saved.roomId;
     roomTokenRef.current = saved.token;
@@ -1412,7 +1484,7 @@ export default function App() {
     setRoomToken(saved.token);
     setMode('multiplayer');
     connectMultiplayer(saved.roomId, saved.token, saved.name);
-  }, [connectMultiplayer, isGuestInvite]);
+  }, [connectMultiplayer, inviteRoomParam, inviteTokenParam, isGuestInvite]);
 
   // Reconnect promptly when device regains network or tab returns to foreground
   useEffect(() => {
@@ -1440,6 +1512,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       clearSoloTimers();
+      clearJoinTimeout();
       if (socketRef.current) {
         const oldSocket = socketRef.current;
         socketRef.current = null;
@@ -1447,7 +1520,7 @@ export default function App() {
         oldSocket.disconnect();
       }
     };
-  }, [clearSoloTimers]);
+  }, [clearJoinTimeout, clearSoloTimers]);
 
   const handleHostMultiplayer = async () => {
     const cleanName = nameDraft.trim() || playerName;
@@ -1457,14 +1530,21 @@ export default function App() {
     } catch {
       // ignore
     }
+    disconnectMultiplayer();
     setRoomBusy(true);
     setNetworkError(null);
     clearSoloTimers();
     try {
+      const hostClientId = getOrCreateClientId('host');
       const res = await fetch(buildApiUrl('/api/rooms'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hostName: cleanName, difficulty, playerCount }),
+        body: JSON.stringify({
+          hostName: cleanName,
+          difficulty,
+          playerCount,
+          hostClientId,
+        }),
       });
       if (res.status === 404 || res.status === 405) {
         throw new Error('Multiplayer backend endpoint not found. Check VITE_BACKEND_URL.');
@@ -1481,9 +1561,8 @@ export default function App() {
       setShowQrModal(true);
       connectMultiplayer(data.roomId, data.token, cleanName);
     } catch (err) {
-      setNetworkError(err instanceof Error ? err.message : 'Failed to create room.');
-    } finally {
       setRoomBusy(false);
+      setNetworkError(err instanceof Error ? err.message : 'Failed to create room.');
     }
   };
 
@@ -1501,6 +1580,7 @@ export default function App() {
     } catch {
       // ignore
     }
+    disconnectMultiplayer();
     setRoomBusy(true);
     setNetworkError(null);
     clearSoloTimers();
@@ -1529,13 +1609,12 @@ export default function App() {
       setShowQrModal(false);
       connectMultiplayer(payload.roomId, payload.token, cleanName);
     } catch (err) {
-      setNetworkError(err instanceof Error ? err.message : 'Failed to join room.');
-    } finally {
       setRoomBusy(false);
+      setNetworkError(err instanceof Error ? err.message : 'Failed to join room.');
     }
   };
 
-  const handleJoinInvite = () => {
+  const handleJoinInvite = async () => {
     if (!inviteRoomParam || !inviteTokenParam) return;
     const cleanName = nameDraft.trim() || 'Player';
     setPlayerName(cleanName);
@@ -1544,14 +1623,43 @@ export default function App() {
     } catch {
       // ignore
     }
-    modeRef.current = 'multiplayer';
-    roomIdRef.current = inviteRoomParam;
-    roomTokenRef.current = inviteTokenParam;
-    prevWaitingRef.current = true;
-    setMode('multiplayer');
-    setRoomId(inviteRoomParam);
-    setRoomToken(inviteTokenParam);
-    connectMultiplayer(inviteRoomParam, inviteTokenParam, cleanName);
+    disconnectMultiplayer();
+    setRoomBusy(true);
+    setNetworkError(null);
+    clearSoloTimers();
+    try {
+      const clientId = getOrCreateClientId(inviteRoomParam);
+      const res = await fetch(
+        buildApiUrl(
+          `/api/rooms/${encodeURIComponent(inviteRoomParam)}?token=${encodeURIComponent(
+            inviteTokenParam
+          )}&clientId=${encodeURIComponent(clientId)}`
+        ),
+        { method: 'GET', cache: 'no-store' }
+      );
+      const payload = (await res.json().catch(() => ({}))) as {
+        roomId?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(payload.error || 'Could not validate room invite.');
+      }
+      const verifiedRoomId = payload.roomId
+        ? payload.roomId.trim().toUpperCase()
+        : inviteRoomParam;
+      modeRef.current = 'multiplayer';
+      roomIdRef.current = verifiedRoomId;
+      roomTokenRef.current = inviteTokenParam;
+      prevWaitingRef.current = true;
+      setMode('multiplayer');
+      setRoomId(verifiedRoomId);
+      setRoomToken(inviteTokenParam);
+      setShowQrModal(false);
+      connectMultiplayer(verifiedRoomId, inviteTokenParam, cleanName);
+    } catch (err) {
+      setRoomBusy(false);
+      setNetworkError(err instanceof Error ? err.message : 'Failed to join invited room.');
+    }
   };
 
   const handleCallUno = useCallback(() => {
@@ -1881,7 +1989,8 @@ export default function App() {
 
   const inviteUrl = useMemo(() => {
     if (!roomId || !roomToken) return '';
-    return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomId)}&token=${encodeURIComponent(roomToken)}`;
+    const cleanRoom = roomId.trim().toUpperCase();
+    return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(cleanRoom)}&token=${encodeURIComponent(roomToken.trim())}`;
   }, [roomId, roomToken]);
 
   const isMyTurn = Boolean(activeView && activeView.turn === activeView.selfRole);
@@ -2286,24 +2395,40 @@ export default function App() {
                     </div>
                   )}
 
-                  {networkError && (
+                  {networkError ? (
                     <div className="rounded-xl bg-[#ee3f4f]/15 border border-[#ee3f4f]/50 px-4 py-2.5 text-xs text-[#ffb4bc]">
                       {networkError}
                     </div>
-                  )}
+                  ) : mode === 'multiplayer' && (wsStatus === 'connecting' || wsStatus === 'reconnecting') ? (
+                    <div
+                      className="rounded-xl border px-4 py-2.5 text-xs text-[#f4f4ed] inline-flex items-center gap-2 w-full"
+                      style={{
+                        backgroundColor: 'rgba(255,255,255,0.05)',
+                        borderColor: activeTheme.surfaceBorder,
+                      }}
+                    >
+                      <Wifi className="w-3.5 h-3.5 animate-pulse shrink-0" style={{ color: activeTheme.accent }} />
+                      <span>
+                        {wsStatus === 'reconnecting'
+                          ? 'Connecting to multiplayer server...'
+                          : 'Joining multiplayer room...'}
+                      </span>
+                    </div>
+                  ) : null}
 
                   {/* Play Actions */}
                   {isGuestInvite ? (
                     <div className="flex flex-col sm:flex-row gap-3 pt-1">
                       <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
+                        whileHover={{ scale: roomBusy ? 1 : 1.02 }}
+                        whileTap={{ scale: roomBusy ? 1 : 0.98 }}
                         type="button"
+                        disabled={roomBusy}
                         onClick={handleJoinInvite}
-                        className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                        className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 disabled:opacity-60 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
                         style={{ backgroundColor: activeTheme.accent }}
                       >
-                        Join Match
+                        {roomBusy ? 'Joining Match...' : 'Join Match'}
                       </motion.button>
                       <motion.button
                         whileHover={{ scale: 1.02 }}

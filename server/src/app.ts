@@ -42,6 +42,7 @@ interface ServerSeat {
   clientId: string | null;
   name: string;
   socketId: string | null;
+  hasConnectedOnce: boolean;
   isCpu: boolean;
   hand: Card[];
   unoArmed: boolean;
@@ -199,7 +200,7 @@ export function attachMultiplayerServer(
       const host = req.headers.host;
       callback(null, isOriginAllowed(origin, allowedOrigins, host));
     },
-    transports: ['websocket', 'polling'],
+    transports: ['polling', 'websocket'],
     pingInterval: 20_000,
     pingTimeout: 25_000,
   });
@@ -218,13 +219,20 @@ export function attachMultiplayerServer(
   function createRoom(
     hostNameRaw?: unknown,
     difficultyRaw?: unknown,
-    playerCountRaw?: unknown
+    playerCountRaw?: unknown,
+    hostClientIdRaw?: unknown
   ): RoomState {
     const roomId = generateRoomCode();
     const token = crypto.randomBytes(16).toString('base64url');
     const hostName = sanitizeName(hostNameRaw, 'Host');
     const difficulty: DifficultyLevel = isDifficultyLevel(difficultyRaw) ? difficultyRaw : 'normal';
     const playerCount = clampPlayerCount(playerCountRaw);
+    const hostClientId =
+      typeof hostClientIdRaw === 'string' &&
+      hostClientIdRaw.trim().length > 0 &&
+      hostClientIdRaw.trim().length <= 100
+        ? hostClientIdRaw.trim()
+        : null;
 
     const seatNames = Array.from({ length: playerCount }, (_, idx) =>
       idx === 0 ? hostName : `Player ${idx + 1}`
@@ -233,9 +241,10 @@ export function attachMultiplayerServer(
 
     const seats: ServerSeat[] = seatNames.map((name, idx) => ({
       index: idx,
-      clientId: null,
+      clientId: idx === 0 ? hostClientId : null,
       name,
       socketId: null,
+      hasConnectedOnce: false,
       isCpu: false,
       hand: dealt.hands[idx] ?? [],
       unoArmed: false,
@@ -858,9 +867,14 @@ export function attachMultiplayerServer(
   app.post('/api/rooms', (req, res) => {
     const body =
       req.body && typeof req.body === 'object'
-        ? (req.body as { hostName?: unknown; difficulty?: unknown; playerCount?: unknown })
+        ? (req.body as {
+            hostName?: unknown;
+            difficulty?: unknown;
+            playerCount?: unknown;
+            hostClientId?: unknown;
+          })
         : {};
-    const room = createRoom(body.hostName, body.difficulty, body.playerCount);
+    const room = createRoom(body.hostName, body.difficulty, body.playerCount, body.hostClientId);
     res.status(201).json({
       roomId: room.roomId,
       token: room.token,
@@ -909,14 +923,22 @@ export function attachMultiplayerServer(
       res.status(404).json({ error: 'Room not found or expired.' });
       return;
     }
-    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    const token = typeof req.query.token === 'string' ? req.query.token.trim() : '';
     if (!token || token !== room.token) {
       res.status(403).json({ error: 'Invalid invite token.' });
+      return;
+    }
+    const clientId = typeof req.query.clientId === 'string' ? req.query.clientId.trim() : '';
+    const existingSeat = clientId ? room.seats.find((s) => s.clientId === clientId) : undefined;
+    const hasOpenSeat = room.seats.some((s) => s.clientId === null && !s.isCpu);
+    if (!existingSeat && !hasOpenSeat) {
+      res.status(409).json({ error: `Room ${room.roomId} is already full.` });
       return;
     }
     const joinedCount = room.seats.filter((s) => s.clientId !== null).length;
     res.json({
       roomId: room.roomId,
+      token: room.token,
       hostName: room.seats[0]?.name ?? 'Host',
       difficulty: room.difficulty,
       playerCount: room.playerCount,
@@ -945,19 +967,29 @@ export function attachMultiplayerServer(
       return { room, activeSeat };
     };
 
-    const bindSocketToRoom = (payload: JoinRoomPayload) => {
+    const bindSocketToRoom = (
+      payload: JoinRoomPayload,
+      ack?: (res: { ok: boolean; roomId?: string; seatIndex?: number; error?: string }) => void
+    ) => {
       const room = rooms.get(sanitizeRoomCode(payload?.roomId));
       if (!room) {
-        sendError(socket, 'This game room does not exist or has expired.');
+        const msg = 'This game room does not exist or has expired.';
+        sendError(socket, msg);
+        ack?.({ ok: false, error: msg });
         return;
       }
-      if (typeof payload?.token !== 'string' || payload.token !== room.token) {
-        sendError(socket, 'Invalid game invite token.');
+      const cleanToken = typeof payload?.token === 'string' ? payload.token.trim() : '';
+      if (!cleanToken || cleanToken !== room.token) {
+        const msg = 'Invalid game invite token.';
+        sendError(socket, msg);
+        ack?.({ ok: false, error: msg });
         return;
       }
       const clientId = typeof payload.clientId === 'string' ? payload.clientId.trim() : '';
       if (!clientId || clientId.length > 100) {
-        sendError(socket, 'Invalid player session.');
+        const msg = 'Invalid player session.';
+        sendError(socket, msg);
+        ack?.({ ok: false, error: msg });
         return;
       }
 
@@ -966,7 +998,10 @@ export function attachMultiplayerServer(
       let isReconnect = false;
 
       if (targetSeat) {
-        isReconnect = targetSeat.socketId === null || targetSeat.socketId !== socket.id;
+        isFirstSeatJoin = !targetSeat.hasConnectedOnce;
+        isReconnect =
+          targetSeat.hasConnectedOnce &&
+          (targetSeat.socketId === null || targetSeat.socketId !== socket.id);
         if (targetSeat.socketId && targetSeat.socketId !== socket.id) {
           const prevSocket = io.sockets.sockets.get(targetSeat.socketId);
           if (prevSocket) {
@@ -975,6 +1010,7 @@ export function attachMultiplayerServer(
           }
         }
         targetSeat.socketId = socket.id;
+        targetSeat.hasConnectedOnce = true;
         targetSeat.isCpu = false;
         targetSeat.name = sanitizeName(
           payload.name,
@@ -983,12 +1019,15 @@ export function attachMultiplayerServer(
       } else {
         const openSeat = room.seats.find((s) => s.clientId === null && !s.isCpu) ?? null;
         if (!openSeat) {
-          sendError(socket, `This ${room.playerCount}-player room is already full.`);
+          const msg = `This ${room.playerCount}-player room is already full.`;
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
           return;
         }
         isFirstSeatJoin = true;
         openSeat.clientId = clientId;
         openSeat.socketId = socket.id;
+        openSeat.hasConnectedOnce = true;
         openSeat.isCpu = false;
         openSeat.name = sanitizeName(
           payload.name,
@@ -1001,6 +1040,7 @@ export function attachMultiplayerServer(
       boundSeatIndex = targetSeat.index;
       boundClientId = clientId;
       void socket.join(room.roomId);
+      ack?.({ ok: true, roomId: room.roomId, seatIndex: targetSeat.index });
 
       const joinedCount = room.seats.filter((s) => s.clientId !== null || s.isCpu).length;
       if (room.turn === 'waiting') {
@@ -1114,9 +1154,15 @@ export function attachMultiplayerServer(
       }
     );
 
-    socket.on('join', (payload: JoinRoomPayload) => {
-      bindSocketToRoom(payload);
-    });
+    socket.on(
+      'join',
+      (
+        payload: JoinRoomPayload,
+        ack?: (res: { ok: boolean; roomId?: string; seatIndex?: number; error?: string }) => void
+      ) => {
+        bindSocketToRoom(payload, ack);
+      }
+    );
 
     socket.on('rename', (payload: RenamePayload) => {
       const ctx = getBoundContext();

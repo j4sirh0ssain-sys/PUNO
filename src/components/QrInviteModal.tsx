@@ -37,7 +37,7 @@ export function QrInviteModal({
 
   useEffect(() => {
     const canvas = qrCanvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !inviteUrl) return;
     void QRCode.toCanvas(canvas, inviteUrl, {
       width: 184,
       margin: 2,
