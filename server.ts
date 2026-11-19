@@ -1016,6 +1016,7 @@ async function main(): Promise<void> {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
+    app.use('/PUNO', express.static(distDir));
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       const indexHtml = path.join(distDir, 'index.html');
