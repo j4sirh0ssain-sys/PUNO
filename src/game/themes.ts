@@ -6,7 +6,8 @@ export type TableThemeId =
   | 'obsidian'
   | 'sakura'
   | 'pharaoh'
-  | 'aurora';
+  | 'aurora'
+  | 'retro';
 
 export type CardDesignStyle =
   | 'classic'
@@ -14,7 +15,8 @@ export type CardDesignStyle =
   | 'obsidian'
   | 'crest'
   | 'sunburst'
-  | 'prism';
+  | 'prism'
+  | 'comic';
 
 export interface TableTheme {
   id: TableThemeId;
@@ -229,6 +231,37 @@ export const TABLE_THEMES: Record<TableThemeId, TableTheme> = {
     surface: '#0b1c24',
     surfaceBorder: '#1f4754',
   },
+  retro: {
+    id: 'retro',
+    label: 'Retro Toon',
+    cardDesign: 'comic',
+    bgTop: '#10153a',
+    bgMid: '#182158',
+    bgBottom: '#222e75',
+    railDark: '#26142e',
+    railLight: '#f97316',
+    railTrim: '#ffe600',
+    feltCenter: '#11a8a6',
+    feltMid: '#0b7b7f',
+    feltEdge: '#064a52',
+    cardFrame: '#fff8dc',
+    cardFrameOutline: '#141414',
+    cardCenterBg: '#fffdf2',
+    cardBackBg: '#1c1847',
+    cardBackMedallion: '#ff3b5c',
+    cardBackMedallionShadow: '#141414',
+    cardBackBorder: '#ffe600',
+    suitHex: {
+      Red: '#ff3b5c',
+      Blue: '#1e90ff',
+      Green: '#22c55e',
+      Yellow: '#ffcf24',
+      Wild: '#1e1b4b',
+    },
+    accent: '#ffe600',
+    surface: '#161c4b',
+    surfaceBorder: '#3b4894',
+  },
 };
 
 export const THEME_LIST: TableTheme[] = [
@@ -238,6 +271,7 @@ export const THEME_LIST: TableTheme[] = [
   TABLE_THEMES.sakura,
   TABLE_THEMES.pharaoh,
   TABLE_THEMES.aurora,
+  TABLE_THEMES.retro,
 ];
 
 export type WinParticleShape = 'rect' | 'coin' | 'diamond' | 'shard' | 'petal';
@@ -432,6 +466,35 @@ export const THEME_WIN_SPECS: Record<TableThemeId, Record<1 | 5 | 10, ThemeWinMi
       secondary: '#38bdf8',
       particleShape: 'shard',
       ringSides: 6,
+      emblem: 'crown',
+    },
+  },
+  retro: {
+    1: {
+      title: 'Toon Rookie · 1st Win',
+      subtitle: 'POW! Your first comic-strip victory on the retro table.',
+      accent: '#ffe600',
+      secondary: '#ff3b5c',
+      particleShape: 'rect',
+      ringSides: 0,
+      emblem: 'sparkles',
+    },
+    5: {
+      title: 'Saturday Star · 5 Wins',
+      subtitle: 'Five colorful Saturday-morning knockouts in a row!',
+      accent: '#ffe600',
+      secondary: '#1e90ff',
+      particleShape: 'rect',
+      ringSides: 5,
+      emblem: 'zap',
+    },
+    10: {
+      title: 'Cartoon Legend · 10 Wins',
+      subtitle: 'Ten ink-and-paint victories — hall of fame toon champ!',
+      accent: '#ffe600',
+      secondary: '#22c55e',
+      particleShape: 'rect',
+      ringSides: 8,
       emblem: 'crown',
     },
   },

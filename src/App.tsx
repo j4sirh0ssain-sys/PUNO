@@ -109,7 +109,8 @@ function isThemeId(value: string | null): value is TableThemeId {
     value === 'obsidian' ||
     value === 'sakura' ||
     value === 'pharaoh' ||
-    value === 'aurora'
+    value === 'aurora' ||
+    value === 'retro'
   );
 }
 
@@ -184,6 +185,7 @@ function ShowcaseCard({
         zIndex,
         backgroundColor: theme.cardFrame,
         borderColor: theme.cardFrameOutline,
+        boxShadow: design === 'comic' ? '6px 8px 0 rgba(12, 14, 26, 0.85)' : undefined,
       }}
       className="absolute w-28 h-40 rounded-xl p-1.5 shadow-2xl border-2 cursor-pointer select-none"
     >
@@ -197,13 +199,15 @@ function ShowcaseCard({
                 ? '#110f0a'
                 : suitColor,
           border:
-            design === 'obsidian'
-              ? `2px solid ${isWild ? '#38bdf8' : suitColor}`
-              : design === 'sunburst'
-                ? '1.5px solid #d4a63a'
-                : design === 'deco'
-                  ? '1.5px solid #f0d086'
-                  : '1px solid rgba(255,255,255,0.28)',
+            design === 'comic'
+              ? '2px solid #141414'
+              : design === 'obsidian'
+                ? `2px solid ${isWild ? '#38bdf8' : suitColor}`
+                : design === 'sunburst'
+                  ? '1.5px solid #d4a63a'
+                  : design === 'deco'
+                    ? '1.5px solid #f0d086'
+                    : '1px solid rgba(255,255,255,0.28)',
         }}
       >
         <span
@@ -276,6 +280,20 @@ function ShowcaseCard({
               strokeWidth="1.6"
             />
           )}
+          {design === 'comic' && (
+            <g transform="rotate(24)">
+              <ellipse cx="3" cy="3.5" rx="28" ry="41" fill="#141414" />
+              <ellipse
+                cx="0"
+                cy="0"
+                rx="28"
+                ry="41"
+                fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
+                stroke="#141414"
+                strokeWidth="2.6"
+              />
+            </g>
+          )}
         </svg>
 
         <span
@@ -284,7 +302,10 @@ function ShowcaseCard({
           }`}
           style={{
             color: centerTextColor,
-            textShadow: '0 2px 3px rgba(0,0,0,0.35)',
+            textShadow:
+              design === 'comic'
+                ? '2px 2.5px 0 #141414'
+                : '0 2px 3px rgba(0,0,0,0.35)',
           }}
         >
           {label}

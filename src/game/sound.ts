@@ -136,10 +136,11 @@ class SoundEffects {
       sakura: 'sine',
       pharaoh: 'triangle',
       aurora: 'sine',
+      retro: 'square',
     };
 
     const voice = themeVoice[themeId];
-    const baseVol = voice === 'sawtooth' ? 0.055 : 0.09;
+    const baseVol = voice === 'sawtooth' || voice === 'square' ? 0.05 : 0.09;
 
     const scales: Record<TableThemeId, number[]> = {
       emerald: [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98, 2093.0],
@@ -148,6 +149,7 @@ class SoundEffects {
       sakura: [440.0, 493.88, 659.25, 739.99, 880.0, 1174.66, 1479.98], // Yo pentatonic feel
       pharaoh: [329.63, 440.0, 493.88, 659.25, 880.0, 987.77, 1318.51],
       aurora: [587.33, 739.99, 880.0, 1108.73, 1318.51, 1479.98, 1760.0],
+      retro: [523.25, 659.25, 783.99, 987.77, 1046.5, 1318.51, 1567.98],
     };
 
     const scale = scales[themeId];

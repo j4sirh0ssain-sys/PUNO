@@ -1675,11 +1675,17 @@ export class PunoCanvasEngine {
     ctx.rotate((angleDeg * Math.PI) / 180);
     ctx.scale(s * fx, s);
 
-    // Ambient shadow
+    // Ambient shadow (hard ink offset shadow for retro comic cards)
     const so = 5 + lift * 0.25;
-    ctx.fillStyle = 'rgba(2, 5, 10, 0.45)';
-    this.roundRectPath(ctx, -41.5, -58.5 + so, 83, 117, 10.5);
-    ctx.fill();
+    if (design === 'comic') {
+      ctx.fillStyle = 'rgba(10, 12, 22, 0.82)';
+      this.roundRectPath(ctx, -37.5, -54.5 + so, 80, 114, 9);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = 'rgba(2, 5, 10, 0.45)';
+      this.roundRectPath(ctx, -41.5, -58.5 + so, 83, 117, 10.5);
+      ctx.fill();
+    }
 
     // Playable halo glow
     if (glow > 0.03) {
@@ -1695,7 +1701,12 @@ export class PunoCanvasEngine {
     // Outer card frame
     ctx.fillStyle = tone(th.cardFrame);
     ctx.strokeStyle = dim < 0.01 ? tone(th.cardFrameOutline) : tone('#64748b');
-    ctx.lineWidth = design === 'obsidian' || design === 'sunburst' ? 1.8 : 1.5;
+    ctx.lineWidth =
+      design === 'comic'
+        ? 2.4
+        : design === 'obsidian' || design === 'sunburst'
+          ? 1.8
+          : 1.5;
     this.roundRectPath(ctx, -40, -57, 80, 114, 9);
     ctx.fill();
     ctx.stroke();
@@ -1955,6 +1966,65 @@ export class PunoCanvasEngine {
         ctx.fill();
         ctx.stroke();
       }
+    } else if (design === 'comic') {
+      // Retro Toon: thick ink outlines, halftone corner dots, hard offset shadow oval
+      ctx.fillStyle = tone(base);
+      this.roundRectPath(ctx, -35, -52, 70, 104, 6);
+      ctx.fill();
+
+      ctx.strokeStyle = tone('#141414');
+      ctx.lineWidth = 2;
+      this.roundRectPath(ctx, -35, -52, 70, 104, 6);
+      ctx.stroke();
+
+      // Comic halftone corner dots (TR & BL so corner indices stay crisp)
+      ctx.fillStyle = tone('rgba(255, 255, 255, 0.24)');
+      for (const [bx, by] of [
+        [20, -45],
+        [27, -45],
+        [27, -38],
+        [-20, 45],
+        [-27, 45],
+        [-27, 38],
+      ]) {
+        ctx.beginPath();
+        ctx.arc(bx, by, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.save();
+      ctx.rotate((24 * Math.PI) / 180);
+      // Hard offset ink shadow behind oval
+      ctx.fillStyle = tone('#141414');
+      ctx.beginPath();
+      ctx.ellipse(2.6, 3.2, 28, 41, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (card.color === 'Wild') {
+        const quadColors: SuitColor[] = ['Red', 'Blue', 'Green', 'Yellow'];
+        for (let i = 0; i < 4; i++) {
+          ctx.fillStyle = tone(th.suitHex[quadColors[i]]);
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.ellipse(0, 0, 28, 41, 0, (i * Math.PI) / 2, ((i + 1) * Math.PI) / 2);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.strokeStyle = tone('#141414');
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 28, 41, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = tone(th.cardCenterBg);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 28, 41, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = tone('#141414');
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+      }
+      ctx.restore();
     } else {
       // Monte Carlo Classic: glossy oval medallion
       ctx.fillStyle = tone(base);
@@ -2321,6 +2391,27 @@ export class PunoCanvasEngine {
       this.drawDiamondPath(ctx, 25, 38);
       ctx.fill();
       ctx.stroke();
+    } else if (th.cardDesign === 'comic') {
+      ctx.strokeStyle = tone('#141414');
+      ctx.lineWidth = 2;
+      this.roundRectPath(ctx, -35, -52, 70, 104, 6);
+      ctx.stroke();
+
+      ctx.save();
+      ctx.rotate((24 * Math.PI) / 180);
+      ctx.fillStyle = tone('#141414');
+      ctx.beginPath();
+      ctx.ellipse(3, 3.5, 29, 43, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = tone(th.cardBackMedallion);
+      ctx.strokeStyle = tone(th.cardBackBorder);
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 29, 43, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     } else {
       ctx.save();
       ctx.rotate((28 * Math.PI) / 180);
@@ -2341,7 +2432,7 @@ export class PunoCanvasEngine {
 
     if (fx >= 0.35) {
       ctx.save();
-      ctx.rotate(th.cardDesign === 'classic' ? (-24 * Math.PI) / 180 : 0);
+      ctx.rotate(th.cardDesign === 'classic' || th.cardDesign === 'comic' ? (-24 * Math.PI) / 180 : 0);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = 'italic 800 16px "Outfit", sans-serif';

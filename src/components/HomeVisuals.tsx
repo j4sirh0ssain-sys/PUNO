@@ -9,34 +9,72 @@ interface PunoLogoProps {
 export function PunoLogo({ theme, size = 'lg' }: PunoLogoProps) {
   if (size === 'sm') {
     return (
-      <span className="inline-flex items-center gap-2 select-none">
+      <span className="relative inline-flex items-center justify-center select-none px-1.5 py-0.5">
+        {/* Left peeking mini suit card */}
         <span
-          className="relative w-7 h-7 rounded-lg flex items-center justify-center border shadow-sm overflow-hidden -rotate-6 shrink-0"
-          style={{
-            backgroundColor: theme.suitHex.Red,
-            borderColor: 'rgba(255,255,255,0.7)',
-            boxShadow: `0 3px 10px ${theme.suitHex.Red}55`,
-          }}
           aria-hidden="true"
+          className="absolute -left-0.5 -top-0.5 w-3.5 h-5 rounded-[3px] border border-white/80 -rotate-12 shadow-sm pointer-events-none"
+          style={{ backgroundColor: theme.suitHex.Blue }}
+        />
+
+        {/* Right peeking mini suit card */}
+        <span
+          aria-hidden="true"
+          className="absolute -right-0.5 -bottom-0.5 w-3.5 h-5 rounded-[3px] border border-white/80 rotate-12 shadow-sm pointer-events-none"
+          style={{ backgroundColor: theme.suitHex.Green }}
+        />
+
+        {/* Tilted Crest Plate */}
+        <span
+          className="relative -rotate-3 rounded-xl border-[1.5px] px-2.5 py-0.5 shadow-md overflow-hidden inline-flex items-center justify-center"
+          style={{
+            background: `linear-gradient(145deg, ${theme.suitHex.Red} 0%, #991b1b 55%, #450a0a 100%)`,
+            borderColor: '#ffffffeb',
+            boxShadow: `0 4px 12px rgba(0,0,0,0.45), 0 0 0 1.5px ${theme.accent}66`,
+          }}
         >
           <span
-            className="w-5 h-3 rounded-full -rotate-12 border border-white/60"
+            aria-hidden="true"
+            className="absolute inset-x-1 inset-y-0.5 rounded-full -rotate-3 border border-white/25 pointer-events-none"
             style={{
-              background: `linear-gradient(135deg, ${theme.suitHex.Yellow}, ${theme.accent})`,
+              background: `radial-gradient(ellipse at 35% 30%, ${theme.suitHex.Yellow}2e, transparent 70%)`,
             }}
           />
-          <span className="absolute font-display font-black italic text-[11px] text-white leading-none drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
-            P
+          <motion.span
+            aria-hidden="true"
+            animate={{ x: ['-140%', '240%'] }}
+            transition={{ duration: 2.2, repeat: Infinity, repeatDelay: 3.4, ease: 'easeInOut' }}
+            className="pointer-events-none absolute inset-y-0 left-0 w-1/3 -skew-x-12"
+            style={{
+              background:
+                'linear-gradient(90deg, transparent, rgba(255,255,255,0.28), transparent)',
+            }}
+          />
+          <span
+            className="relative font-display text-lg sm:text-xl font-black italic tracking-tight leading-none"
+            style={{
+              color: theme.suitHex.Yellow,
+              WebkitTextStroke: '1px #140b0e',
+              textShadow: `0 2px 0 #140b0e, 0 3px 6px rgba(0,0,0,0.6)`,
+            }}
+          >
+            PUNO
           </span>
         </span>
+
+        {/* Tiny 4-suit corner gem */}
         <span
-          className="font-display text-xl sm:text-2xl font-black italic tracking-tight leading-none"
+          aria-hidden="true"
+          className="absolute -bottom-1 right-1 flex items-center gap-0.5 px-1 py-[1px] rounded-full border shadow-sm"
           style={{
-            color: theme.accent,
-            textShadow: '0 2px 0 rgba(0,0,0,0.65)',
+            backgroundColor: theme.bgTop,
+            borderColor: theme.surfaceBorder,
           }}
         >
-          PUNO
+          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: theme.suitHex.Red }} />
+          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: theme.suitHex.Blue }} />
+          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: theme.suitHex.Green }} />
+          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: theme.suitHex.Yellow }} />
         </span>
       </span>
     );
