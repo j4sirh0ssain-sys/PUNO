@@ -24,18 +24,21 @@ import {
   type DifficultyLevel,
   type EffectEvent,
   type JoinRoomPayload,
+  type KickPlayerPayload,
   type PlayCardPayload,
   type PlayerRole,
   type RenamePayload,
   type RestartPayload,
   type SeatInfo,
   type ServerStatePayload,
+  type StartGamePayload,
   type SuitColor,
   type TurnPhase,
 } from './game/types.ts';
 
 const ROOM_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const DEFAULT_GITHUB_PAGES_ORIGIN = 'https://j4sirh0ssain-sys.github.io';
+const DEFAULT_TURN_TIMEOUT_MS = 25_000;
 
 interface ServerSeat {
   index: number;
@@ -55,6 +58,7 @@ interface RoomState {
   token: string;
   difficulty: DifficultyLevel;
   playerCount: number;
+  hostIndex: number;
   seats: ServerSeat[];
   deck: Card[];
   discard: Card[];
@@ -70,7 +74,12 @@ interface RoomState {
   winnerName: string | null;
   message: string;
   roundId: number;
+  turnSeq: number;
   cpuTimer: NodeJS.Timeout | null;
+  turnTimer: NodeJS.Timeout | null;
+  turnDeadlineAt: number | null;
+  kickedClientIds: Set<string>;
+  kickVotes: Map<number, Set<string>>;
   createdAt: number;
   lastActivityAt: number;
 }
@@ -159,10 +168,14 @@ function sanitizeRoomCode(raw: unknown): string {
 export function attachMultiplayerServer(
   app: Express,
   server: http.Server,
-  options: { exposeRootHealth?: boolean } = {}
+  options: { exposeRootHealth?: boolean; turnTimeoutMs?: number } = {}
 ): SocketIOServer {
   const rooms = new Map<string, RoomState>();
   const allowedOrigins = buildAllowedOrigins();
+  const turnTimeoutMs =
+    typeof options.turnTimeoutMs === 'number' && options.turnTimeoutMs > 0
+      ? options.turnTimeoutMs
+      : DEFAULT_TURN_TIMEOUT_MS;
 
   const corsMiddleware = cors((req, callback) => {
     const origin = req.headers.origin;
@@ -257,6 +270,7 @@ export function attachMultiplayerServer(
       token,
       difficulty,
       playerCount,
+      hostIndex: 0,
       seats,
       deck: dealt.deck,
       discard: dealt.discard,
@@ -275,7 +289,12 @@ export function attachMultiplayerServer(
           ? `Share room code ${roomId} or the QR invite link.`
           : `Waiting for players (0/${playerCount} ready) — code ${roomId}.`,
       roundId: 1,
+      turnSeq: 0,
       cpuTimer: null,
+      turnTimer: null,
+      turnDeadlineAt: null,
+      kickedClientIds: new Set<string>(),
+      kickVotes: new Map<number, Set<string>>(),
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
     };
@@ -305,16 +324,28 @@ export function attachMultiplayerServer(
     const nextIndex = (seatIndex + 1) % room.seats.length;
     const primaryOpp = room.seats[nextIndex] ?? room.seats[0];
 
-    const seatInfos: SeatInfo[] = room.seats.map((s) => ({
-      index: s.index,
-      name: s.name,
-      isCpu: s.isCpu,
-      connected: getSeatConnected(s),
-      cardCount: s.hand.length,
-      unoArmed: s.unoArmed,
-      eliminated: s.eliminated,
-      score: s.score,
-    }));
+    const humanCount = room.seats.filter((s) => !s.isCpu && s.clientId !== null).length;
+    const kickVotesRequired =
+      humanCount >= 3 ? Math.floor(humanCount / 2) + 1 : 2;
+    const selfClientId = selfSeat.clientId;
+
+    const seatInfos: SeatInfo[] = room.seats.map((s) => {
+      const voterSet = room.kickVotes.get(s.index);
+      return {
+        index: s.index,
+        name: s.name,
+        isCpu: s.isCpu,
+        connected: getSeatConnected(s),
+        occupied: s.clientId !== null && !s.isCpu,
+        cardCount: s.hand.length,
+        unoArmed: s.unoArmed,
+        eliminated: s.eliminated,
+        score: s.score,
+        kickVotes: voterSet ? voterSet.size : 0,
+        kickVotesRequired,
+        votedToKickBySelf: Boolean(selfClientId && voterSet?.has(selfClientId)),
+      };
+    });
 
     let viewTurn: TurnPhase;
     if (
@@ -341,6 +372,7 @@ export function attachMultiplayerServer(
       0
     );
 
+    const nowMs = Date.now();
     return {
       roomId: room.roomId,
       mode: 'multiplayer',
@@ -378,6 +410,10 @@ export function attachMultiplayerServer(
       },
       message: room.message,
       roundId: room.roundId,
+      hostIndex: room.hostIndex,
+      turnDeadlineAt: room.turnDeadlineAt,
+      turnDurationMs: turnTimeoutMs,
+      serverNow: nowMs,
     };
   }
 
@@ -408,31 +444,108 @@ export function attachMultiplayerServer(
     }
   }
 
+  function clearTurnTimer(room: RoomState): void {
+    if (room.turnTimer) {
+      clearTimeout(room.turnTimer);
+      room.turnTimer = null;
+    }
+    room.turnDeadlineAt = null;
+  }
+
   function recycleHandToDeck(room: RoomState, hand: Card[]): void {
     if (hand.length === 0) return;
     room.deck.unshift(...hand.splice(0, hand.length));
   }
 
+  function handleTurnTimeout(
+    room: RoomState,
+    expectedRound: number,
+    expectedSeatIndex: number,
+    expectedTurnSeq: number
+  ): void {
+    if (
+      room.roundId !== expectedRound ||
+      room.turnSeq !== expectedTurnSeq ||
+      room.winnerIndex !== null ||
+      (room.turn !== 'host' && room.turn !== 'guest') ||
+      room.turnIndex !== expectedSeatIndex
+    ) {
+      return;
+    }
+
+    const timedOutSeat = room.seats[expectedSeatIndex];
+    if (!timedOutSeat || timedOutSeat.eliminated || timedOutSeat.isCpu) return;
+
+    clearTurnTimer(room);
+    timedOutSeat.unoArmed = false;
+    room.drawnUid = null;
+
+    if (room.pendingDrawStack > 0) {
+      const stackCount = room.pendingDrawStack;
+      const effs: EffectEvent[] = [
+        { kind: 'banner', text: 'TIME UP!', color: '#fb923c', size: 0.65, dur: 0.9 },
+      ];
+      for (let i = 0; i < stackCount; i++) {
+        const res = drawOneFromDeck(room.deck, room.discard, timedOutSeat.hand);
+        if (res.reshuffled) effs.push({ kind: 'reshuffle' });
+      }
+      effs.push({ kind: 'seat_draw', seatIndex: timedOutSeat.index, count: stackCount });
+      room.pendingDrawStack = 0;
+      room.pendingDrawMin = 0;
+
+      if (handleMercyKnockout(room, timedOutSeat, effs)) return;
+
+      room.turnIndex = advanceTurn(room, 1);
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      const nextSeat = room.seats[room.turnIndex];
+      room.message = `${timedOutSeat.name} timed out (+${stackCount} cards) — ${nextSeat.name}'s turn.`;
+      scheduleCpuIfNeeded(room);
+      broadcastRoom(room, () => effs);
+      return;
+    }
+
+    room.turnIndex = advanceTurn(room, 1);
+    room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    const nextSeat = room.seats[room.turnIndex];
+    room.message = `${timedOutSeat.name} timed out — ${nextSeat.name}'s turn.`;
+    scheduleCpuIfNeeded(room);
+    broadcastRoom(room, () => [
+      { kind: 'banner', text: 'TIME UP!', color: '#fb923c', size: 0.65, dur: 0.9 },
+    ]);
+  }
+
   function scheduleCpuIfNeeded(room: RoomState): void {
     clearCpuTimer(room);
+    clearTurnTimer(room);
     if (room.winnerIndex !== null || (room.turn !== 'host' && room.turn !== 'guest')) return;
     const activeSeat = room.seats[room.turnIndex];
-    if (!activeSeat || !activeSeat.isCpu || activeSeat.eliminated) return;
+    if (!activeSeat || activeSeat.eliminated) return;
 
+    room.turnSeq += 1;
     const expectedRound = room.roundId;
     const expectedSeatIndex = activeSeat.index;
-    room.cpuTimer = setTimeout(() => {
-      if (
-        room.roundId !== expectedRound ||
-        room.winnerIndex !== null ||
-        room.turnIndex !== expectedSeatIndex ||
-        !activeSeat.isCpu ||
-        activeSeat.eliminated
-      ) {
-        return;
-      }
-      executeCpuTurn(room, activeSeat);
-    }, 800);
+    const expectedTurnSeq = room.turnSeq;
+
+    if (activeSeat.isCpu) {
+      room.cpuTimer = setTimeout(() => {
+        if (
+          room.roundId !== expectedRound ||
+          room.winnerIndex !== null ||
+          room.turnIndex !== expectedSeatIndex ||
+          !activeSeat.isCpu ||
+          activeSeat.eliminated
+        ) {
+          return;
+        }
+        executeCpuTurn(room, activeSeat);
+      }, 800);
+      return;
+    }
+
+    room.turnDeadlineAt = Date.now() + turnTimeoutMs;
+    room.turnTimer = setTimeout(() => {
+      handleTurnTimeout(room, expectedRound, expectedSeatIndex, expectedTurnSeq);
+    }, turnTimeoutMs);
   }
 
   function finishRoundWithWinner(
@@ -442,6 +555,7 @@ export function attachMultiplayerServer(
     extraEffectsForSeat?: (seatIdx: number) => EffectEvent[]
   ): void {
     clearCpuTimer(room);
+    clearTurnTimer(room);
     room.pendingDrawStack = 0;
     room.pendingDrawMin = 0;
     room.winner = winnerSeat.index === 0 ? 'host' : 'guest';
@@ -490,7 +604,12 @@ export function attachMultiplayerServer(
         `MERCY KO! ${loserSeat.name} hit 25+ cards — ${survivor.name} wins!`,
         (seatIdx) => [
           ...baseEffects,
-          { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser: loserSeat.index === seatIdx },
+          {
+            kind: 'mercy_ko',
+            loserName: loserSeat.name,
+            isSelfLoser: loserSeat.index === seatIdx,
+            seatIndex: loserSeat.index,
+          },
         ]
       );
       return true;
@@ -502,11 +621,16 @@ export function attachMultiplayerServer(
     room.turn = room.turnIndex === 0 ? 'host' : 'guest';
     const nextSeat = room.seats[room.turnIndex];
     room.message = `MERCY KO! ${loserSeat.name} eliminated! ${nextSeat.name}'s turn.`;
+    scheduleCpuIfNeeded(room);
     broadcastRoom(room, (seatIdx) => [
       ...baseEffects,
-      { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser: loserSeat.index === seatIdx },
+      {
+        kind: 'mercy_ko',
+        loserName: loserSeat.name,
+        isSelfLoser: loserSeat.index === seatIdx,
+        seatIndex: loserSeat.index,
+      },
     ]);
-    scheduleCpuIfNeeded(room);
     return true;
   }
 
@@ -537,13 +661,19 @@ export function attachMultiplayerServer(
         whoName: activeSeat.name,
         color: chosenColor,
         count: extras.length + 1,
+        seatIndex: activeSeat.index,
       });
     }
 
     room.discard.push(card);
     room.currentColor = chosenColor;
     room.drawnUid = null;
-    sharedEffects.push({ kind: 'impact', card, activeColor: chosenColor });
+    sharedEffects.push({
+      kind: 'impact',
+      card,
+      activeColor: chosenColor,
+      seatIndex: activeSeat.index,
+    });
 
     if (activeSeat.hand.length === 0) {
       finishRoundWithWinner(room, activeSeat, `${activeSeat.name} wins the round!`, () => sharedEffects);
@@ -562,18 +692,25 @@ export function attachMultiplayerServer(
           const res = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
           if (res.reshuffled) sharedEffects.push({ kind: 'reshuffle' });
         }
+        sharedEffects.push({ kind: 'seat_draw', seatIndex: activeSeat.index, count: 2 });
       }
     }
 
     const perSeatEffects = (seatIdx: number): EffectEvent[] => {
       const list = [...sharedEffects];
       if (unoTrigger === 'armed') {
-        list.push({ kind: 'uno', whoName: activeSeat.name, isSelf: activeSeat.index === seatIdx });
+        list.push({
+          kind: 'uno',
+          whoName: activeSeat.name,
+          isSelf: activeSeat.index === seatIdx,
+          seatIndex: activeSeat.index,
+        });
       } else if (unoTrigger === 'penalty') {
         list.push({
           kind: 'uno_penalty',
           whoName: activeSeat.name,
           isSelf: activeSeat.index === seatIdx,
+          seatIndex: activeSeat.index,
         });
       }
       return list;
@@ -601,6 +738,7 @@ export function attachMultiplayerServer(
           if (res.reshuffled) reshuffledAny = true;
         }
         if (reshuffledAny) sharedEffects.push({ kind: 'reshuffle' });
+        sharedEffects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: drawAmount });
         room.turnIndex = advanceTurn(room, 2);
         room.turn = room.turnIndex === 0 ? 'host' : 'guest';
         const nextSeat = room.seats[room.turnIndex];
@@ -618,7 +756,11 @@ export function attachMultiplayerServer(
         whoName: victimSeat.name,
         color: chosenColor,
         drawnCount: rRes.drawnCount,
+        seatIndex: victimSeat.index,
       });
+      if (rRes.drawnCount > 0) {
+        sharedEffects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: rRes.drawnCount });
+      }
 
       if (room.difficulty === 'no_mercy' && victimSeat.hand.length >= MERCY_HAND_LIMIT) {
         if (handleMercyKnockout(room, victimSeat, perSeatEffects(victimSeat.index))) {
@@ -671,8 +813,8 @@ export function attachMultiplayerServer(
           : `${nextSeat.name}'s turn — color is ${chosenColor}.`;
     }
 
-    broadcastRoom(room, perSeatEffects);
     scheduleCpuIfNeeded(room);
+    broadcastRoom(room, perSeatEffects);
   }
 
   function executeCpuTurn(room: RoomState, cpuSeat: ServerSeat): void {
@@ -696,6 +838,7 @@ export function attachMultiplayerServer(
         const res = drawOneFromDeck(room.deck, room.discard, cpuSeat.hand);
         if (res.reshuffled) effs.push({ kind: 'reshuffle' });
       }
+      effs.push({ kind: 'seat_draw', seatIndex: cpuSeat.index, count: stackCount });
       room.pendingDrawStack = 0;
       room.pendingDrawMin = 0;
       room.drawnUid = null;
@@ -706,14 +849,15 @@ export function attachMultiplayerServer(
       room.turn = room.turnIndex === 0 ? 'host' : 'guest';
       const nextSeat = room.seats[room.turnIndex];
       room.message = `${cpuSeat.name} took +${stackCount} cards! ${nextSeat.name}'s turn.`;
-      broadcastRoom(room, () => effs);
       scheduleCpuIfNeeded(room);
+      broadcastRoom(room, () => effs);
       return;
     }
 
     if (!chosen) {
       const { card, reshuffled } = drawOneFromDeck(room.deck, room.discard, cpuSeat.hand);
       const effs: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
+      if (card) effs.push({ kind: 'seat_draw', seatIndex: cpuSeat.index, count: 1 });
 
       if (handleMercyKnockout(room, cpuSeat, effs)) return;
 
@@ -736,8 +880,8 @@ export function attachMultiplayerServer(
       room.message = card
         ? `${cpuSeat.name} drew a card. ${nextSeat.name}'s turn.`
         : `Deck empty — ${nextSeat.name}'s turn.`;
-      broadcastRoom(room, () => effs);
       scheduleCpuIfNeeded(room);
+      broadcastRoom(room, () => effs);
       return;
     }
 
@@ -754,9 +898,11 @@ export function attachMultiplayerServer(
   function startFreshRound(
     room: RoomState,
     nextDifficulty?: DifficultyLevel,
-    fillEmptyWithCpu = false
+    fillEmptyWithCpu = false,
+    keepWaiting = false
   ): void {
     clearCpuTimer(room);
+    clearTurnTimer(room);
     if (nextDifficulty) {
       room.difficulty = nextDifficulty;
     }
@@ -782,7 +928,12 @@ export function attachMultiplayerServer(
     room.pendingDrawStack = 0;
     room.pendingDrawMin = 0;
     room.direction = 1;
-    room.turnIndex = 0;
+    const starterSeat =
+      room.seats[room.hostIndex] &&
+      (room.seats[room.hostIndex].clientId !== null || room.seats[room.hostIndex].isCpu)
+        ? room.seats[room.hostIndex]
+        : room.seats.find((s) => s.clientId !== null || s.isCpu) ?? room.seats[0];
+    room.turnIndex = starterSeat ? starterSeat.index : 0;
     room.winner = null;
     room.winnerIndex = null;
     room.winnerName = null;
@@ -795,17 +946,18 @@ export function attachMultiplayerServer(
     });
 
     const readyCount = room.seats.filter((s) => s.clientId !== null || s.isCpu).length;
-    const hostSeat = room.seats[0];
+    const hostSeat = room.seats[room.hostIndex] ?? room.seats[0];
     const jasirBoost = dealt.jasirSeatIndexes.length > 0;
 
-    if (readyCount >= 2) {
-      room.turn = 'host';
+    if (!keepWaiting && readyCount >= 2) {
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
       room.message = jasirBoost
         ? `j4s1r POWER-UP: 7 power cards dealt! ${hostSeat.name}'s turn.`
         : room.difficulty === 'no_mercy'
           ? `NO MERCY active — ${hostSeat.name}'s turn.`
           : `${hostSeat.name}'s turn — match the color or value.`;
 
+      scheduleCpuIfNeeded(room);
       broadcastRoom(room, (seatIdx) => [
         {
           kind: 'deal',
@@ -814,22 +966,149 @@ export function attachMultiplayerServer(
         },
         {
           kind: 'banner',
-          text: seatIdx === 0 ? 'YOUR TURN' : `${hostSeat.name.toUpperCase()} STARTS`,
+          text: seatIdx === room.turnIndex ? 'YOUR TURN' : `${hostSeat.name.toUpperCase()} STARTS`,
           color: '#f5c84b',
           size: 0.58,
           dur: 1.0,
           delay: 0.7,
         },
       ]);
-      scheduleCpuIfNeeded(room);
     } else {
       room.turn = 'waiting';
       room.message =
-        room.playerCount === 2
-          ? `Share room code ${room.roomId} or the QR invite link.`
-          : `Waiting for players (${readyCount}/${room.playerCount} ready) — code ${room.roomId}.`;
+        readyCount >= room.playerCount
+          ? `All ${room.playerCount} players ready! Waiting for ${hostSeat.name} to start.`
+          : `Waiting for players (${readyCount}/${room.playerCount} ready) — waiting for ${hostSeat.name} to start.`;
       broadcastRoom(room);
     }
+  }
+
+  function performKickSeat(
+    room: RoomState,
+    targetSeat: ServerSeat,
+    reason: 'host' | 'vote'
+  ): void {
+    const kickedName = targetSeat.name;
+    const kickedClientId = targetSeat.clientId;
+    const kickedSocketId = targetSeat.socketId;
+    if (kickedClientId) {
+      room.kickedClientIds.add(kickedClientId);
+      for (const voterSet of room.kickVotes.values()) {
+        voterSet.delete(kickedClientId);
+      }
+    }
+    room.kickVotes.delete(targetSeat.index);
+
+    targetSeat.clientId = null;
+    targetSeat.socketId = null;
+    targetSeat.hasConnectedOnce = false;
+    targetSeat.isCpu = false;
+    targetSeat.name = `Player ${targetSeat.index + 1}`;
+    targetSeat.unoArmed = false;
+    targetSeat.score = 0;
+
+    const kickText =
+      reason === 'vote'
+        ? 'You were removed from the room by majority vote.'
+        : 'You were removed from the room by the host.';
+
+    if (kickedSocketId) {
+      const targetSocket = io.sockets.sockets.get(kickedSocketId);
+      if (targetSocket) {
+        targetSocket.emit('kicked', {
+          roomId: room.roomId,
+          message: kickText,
+        });
+        targetSocket.leave(room.roomId);
+        setTimeout(() => {
+          targetSocket.disconnect(true);
+        }, 80);
+      }
+    }
+
+    if (targetSeat.index === room.hostIndex) {
+      const nextHost = room.seats.find((s) => !s.isCpu && s.clientId !== null);
+      room.hostIndex = nextHost ? nextHost.index : 0;
+    }
+
+    const bannerText =
+      reason === 'vote'
+        ? `${kickedName.toUpperCase()} VOTE KICKED`
+        : `${kickedName.toUpperCase()} KICKED`;
+
+    if (room.turn === 'waiting') {
+      targetSeat.eliminated = false;
+      const readyCount = room.seats.filter((s) => s.clientId !== null || s.isCpu).length;
+      const hostSeat = room.seats[room.hostIndex] ?? room.seats[0];
+      room.message = `${kickedName} was removed (${readyCount}/${room.playerCount} ready) — ${hostSeat.name} can start anytime.`;
+      broadcastRoom(room, () => [
+        {
+          kind: 'banner',
+          text: bannerText,
+          color: '#f43f5e',
+          size: 0.54,
+          dur: 1.05,
+        },
+      ]);
+      return;
+    }
+
+    if (room.turn === 'over') {
+      targetSeat.eliminated = false;
+      room.message = `${kickedName} was removed from the room.`;
+      broadcastRoom(room, () => [
+        {
+          kind: 'banner',
+          text: bannerText,
+          color: '#f43f5e',
+          size: 0.54,
+          dur: 1.05,
+        },
+      ]);
+      return;
+    }
+
+    recycleHandToDeck(room, targetSeat.hand);
+    targetSeat.eliminated = true;
+
+    const remainingActive = room.seats.filter(
+      (s) => !s.eliminated && (s.clientId !== null || s.isCpu)
+    );
+
+    if (remainingActive.length <= 1) {
+      startFreshRound(room, undefined, false, true);
+      room.message = `${kickedName} was removed. Invite another player to start.`;
+      broadcastRoom(room, () => [
+        {
+          kind: 'banner',
+          text: bannerText,
+          color: '#f43f5e',
+          size: 0.56,
+          dur: 1.1,
+        },
+      ]);
+      return;
+    }
+
+    if (room.turnIndex === targetSeat.index) {
+      room.drawnUid = null;
+      room.turnIndex = advanceTurn(room, 1);
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+    }
+    const nextSeat = room.seats[room.turnIndex];
+    room.message = `${kickedName} was removed (${reason === 'vote' ? 'majority vote' : 'host'}). ${
+      nextSeat ? `${nextSeat.name}'s turn.` : ''
+    }`.trim();
+    scheduleCpuIfNeeded(room);
+    broadcastRoom(room, () => [
+      {
+        kind: 'banner',
+        text: bannerText,
+        color: '#f43f5e',
+        size: 0.54,
+        dur: 1.05,
+      },
+    ]);
   }
 
   // Clean up abandoned rooms older than 6 hours
@@ -838,6 +1117,7 @@ export function attachMultiplayerServer(
     for (const [id, room] of rooms.entries()) {
       if (room.lastActivityAt < cutoff) {
         clearCpuTimer(room);
+        clearTurnTimer(room);
         rooms.delete(id);
       }
     }
@@ -900,6 +1180,10 @@ export function attachMultiplayerServer(
     }
 
     const clientId = typeof body.clientId === 'string' ? body.clientId.trim() : '';
+    if (clientId && room.kickedClientIds.has(clientId)) {
+      res.status(403).json({ error: 'You were removed from this room by the host.' });
+      return;
+    }
     const existingSeat = clientId ? room.seats.find((s) => s.clientId === clientId) : undefined;
     const hasOpenSeat = room.seats.some((s) => s.clientId === null && !s.isCpu);
 
@@ -929,6 +1213,10 @@ export function attachMultiplayerServer(
       return;
     }
     const clientId = typeof req.query.clientId === 'string' ? req.query.clientId.trim() : '';
+    if (clientId && room.kickedClientIds.has(clientId)) {
+      res.status(403).json({ error: 'You were removed from this room by the host.' });
+      return;
+    }
     const existingSeat = clientId ? room.seats.find((s) => s.clientId === clientId) : undefined;
     const hasOpenSeat = room.seats.some((s) => s.clientId === null && !s.isCpu);
     if (!existingSeat && !hasOpenSeat) {
@@ -949,11 +1237,10 @@ export function attachMultiplayerServer(
 
   io.on('connection', (socket) => {
     let boundRoomId: string | null = null;
-    let boundSeatIndex: number | null = null;
     let boundClientId: string | null = null;
 
     const getBoundContext = (): { room: RoomState; activeSeat: ServerSeat } | null => {
-      if (boundRoomId === null || boundSeatIndex === null || !boundClientId) {
+      if (boundRoomId === null || !boundClientId) {
         sendError(socket, 'Join a room first.');
         return null;
       }
@@ -962,8 +1249,11 @@ export function attachMultiplayerServer(
         sendError(socket, 'Room closed.');
         return null;
       }
-      const activeSeat = room.seats[boundSeatIndex];
-      if (!activeSeat) return null;
+      const activeSeat = room.seats.find((s) => s.clientId === boundClientId);
+      if (!activeSeat) {
+        sendError(socket, 'You are no longer seated in this room.');
+        return null;
+      }
       return { room, activeSeat };
     };
 
@@ -988,6 +1278,12 @@ export function attachMultiplayerServer(
       const clientId = typeof payload.clientId === 'string' ? payload.clientId.trim() : '';
       if (!clientId || clientId.length > 100) {
         const msg = 'Invalid player session.';
+        sendError(socket, msg);
+        ack?.({ ok: false, error: msg });
+        return;
+      }
+      if (room.kickedClientIds.has(clientId)) {
+        const msg = 'You were removed from this room by the host.';
         sendError(socket, msg);
         ack?.({ ok: false, error: msg });
         return;
@@ -1037,37 +1333,35 @@ export function attachMultiplayerServer(
       }
 
       boundRoomId = room.roomId;
-      boundSeatIndex = targetSeat.index;
       boundClientId = clientId;
       void socket.join(room.roomId);
       ack?.({ ok: true, roomId: room.roomId, seatIndex: targetSeat.index });
 
       const joinedCount = room.seats.filter((s) => s.clientId !== null || s.isCpu).length;
       if (room.turn === 'waiting') {
+        const hostSeat = room.seats[room.hostIndex] ?? room.seats[0];
         if (joinedCount >= room.playerCount) {
-          room.turn = 'host';
-          room.turnIndex = 0;
-          const hostSeat = room.seats[0];
-          room.message = `All ${room.playerCount} players joined! ${hostSeat.name}'s turn.`;
-          const joinerName = targetSeat.name;
-          broadcastRoom(room, (seatIdx) => [
-            seatIdx === 0
-              ? {
-                  kind: 'banner',
-                  text: `${joinerName.toUpperCase()} JOINED`,
-                  color: '#f5c84b',
-                  size: 0.6,
-                  dur: 1.1,
-                }
-              : { kind: 'deal', isJasirBoost: false, difficulty: room.difficulty },
-          ]);
+          room.message = `All ${room.playerCount} players joined! Waiting for ${hostSeat.name} to start.`;
         } else {
           room.message =
             room.playerCount === 2
               ? `Share room code ${room.roomId} or the QR invite link.`
-              : `${targetSeat.name} joined (${joinedCount}/${room.playerCount} ready) — code ${room.roomId}.`;
-          broadcastRoom(room);
+              : `${targetSeat.name} joined (${joinedCount}/${room.playerCount} ready) — waiting for ${hostSeat.name} to start.`;
         }
+        broadcastRoom(room, (seatIdx) => {
+          if (isFirstSeatJoin && seatIdx !== targetSeat.index) {
+            return [
+              {
+                kind: 'banner',
+                text: `${targetSeat.name.toUpperCase()} JOINED`,
+                color: '#f5c84b',
+                size: 0.5,
+                dur: 0.9,
+              },
+            ];
+          }
+          return [];
+        });
       } else {
         if (isReconnect && !isFirstSeatJoin) {
           const currentTurnSeat = room.seats[room.turnIndex];
@@ -1139,6 +1433,10 @@ export function attachMultiplayerServer(
           return;
         }
         const clientId = typeof data?.clientId === 'string' ? data.clientId.trim() : '';
+        if (clientId && room.kickedClientIds.has(clientId)) {
+          ack?.({ ok: false, error: 'You were removed from this room by the host.' });
+          return;
+        }
         const existingSeat = clientId ? room.seats.find((s) => s.clientId === clientId) : undefined;
         const hasOpenSeat = room.seats.some((s) => s.clientId === null && !s.isCpu);
         if (!existingSeat && !hasOpenSeat) {
@@ -1174,22 +1472,198 @@ export function attachMultiplayerServer(
       broadcastRoom(ctx.room);
     });
 
-    socket.on('start_now', () => {
-      const ctx = getBoundContext();
-      if (!ctx) return;
-      if (ctx.activeSeat.index !== 0) {
-        sendError(socket, 'Only the host can start early with CPUs.');
-        return;
+    socket.on(
+      'kick_player',
+      (
+        payload: KickPlayerPayload,
+        ack?: (res: { ok: boolean; error?: string }) => void
+      ) => {
+        const ctx = getBoundContext();
+        if (!ctx) {
+          ack?.({ ok: false, error: 'Join a room first.' });
+          return;
+        }
+        const { room, activeSeat } = ctx;
+        if (activeSeat.index !== room.hostIndex) {
+          const msg = 'Only the host can kick players directly. Use Vote Kick instead.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+        const seatIndex = typeof payload?.seatIndex === 'number' ? payload.seatIndex : -1;
+        if (
+          !Number.isInteger(seatIndex) ||
+          seatIndex < 0 ||
+          seatIndex >= room.seats.length ||
+          seatIndex === room.hostIndex
+        ) {
+          const msg = 'Select a valid player seat to kick.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+        const targetSeat = room.seats[seatIndex];
+        if (!targetSeat || targetSeat.isCpu || targetSeat.clientId === null) {
+          const msg = 'That seat has no human player to kick.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+
+        ack?.({ ok: true });
+        performKickSeat(room, targetSeat, 'host');
       }
-      if (ctx.room.turn !== 'waiting') return;
-      startFreshRound(ctx.room, undefined, true);
-    });
+    );
+
+    socket.on(
+      'vote_kick',
+      (
+        payload: KickPlayerPayload,
+        ack?: (res: {
+          ok: boolean;
+          kicked?: boolean;
+          votes?: number;
+          required?: number;
+          error?: string;
+        }) => void
+      ) => {
+        const ctx = getBoundContext();
+        if (!ctx) {
+          ack?.({ ok: false, error: 'Join a room first.' });
+          return;
+        }
+        const { room, activeSeat } = ctx;
+        const voterClientId = activeSeat.clientId;
+        if (!voterClientId || activeSeat.isCpu) {
+          ack?.({ ok: false, error: 'Only seated players can vote to kick.' });
+          return;
+        }
+        const seatIndex = typeof payload?.seatIndex === 'number' ? payload.seatIndex : -1;
+        if (
+          !Number.isInteger(seatIndex) ||
+          seatIndex < 0 ||
+          seatIndex >= room.seats.length ||
+          seatIndex === activeSeat.index
+        ) {
+          const msg = 'Select another player seat to vote against.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+        const targetSeat = room.seats[seatIndex];
+        if (!targetSeat || targetSeat.isCpu || targetSeat.clientId === null) {
+          const msg = 'That seat has no human player.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+
+        const humanSeats = room.seats.filter((s) => !s.isCpu && s.clientId !== null);
+        if (humanSeats.length < 3) {
+          const msg = 'Majority vote kick requires at least 3 human players.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+
+        const requiredVotes = Math.floor(humanSeats.length / 2) + 1;
+        let voters = room.kickVotes.get(seatIndex);
+        if (!voters) {
+          voters = new Set<string>();
+          room.kickVotes.set(seatIndex, voters);
+        }
+
+        let addedVote = false;
+        if (voters.has(voterClientId)) {
+          voters.delete(voterClientId);
+        } else {
+          voters.add(voterClientId);
+          addedVote = true;
+        }
+
+        if (voters.size >= requiredVotes) {
+          ack?.({ ok: true, kicked: true, votes: voters.size, required: requiredVotes });
+          performKickSeat(room, targetSeat, 'vote');
+          return;
+        }
+
+        ack?.({ ok: true, kicked: false, votes: voters.size, required: requiredVotes });
+        room.message = addedVote
+          ? `${activeSeat.name} voted to kick ${targetSeat.name} (${voters.size}/${requiredVotes}).`
+          : `${activeSeat.name} withdrew kick vote on ${targetSeat.name} (${voters.size}/${requiredVotes}).`;
+        broadcastRoom(room, () =>
+          addedVote
+            ? [
+                {
+                  kind: 'banner',
+                  text: `KICK VOTE ${voters.size}/${requiredVotes}`,
+                  color: '#fb923c',
+                  size: 0.48,
+                  dur: 0.9,
+                },
+              ]
+            : []
+        );
+      }
+    );
+
+    socket.on(
+      'start_now',
+      (
+        payload?: StartGamePayload,
+        ack?: (res: { ok: boolean; error?: string }) => void
+      ) => {
+        const ctx = getBoundContext();
+        if (!ctx) {
+          ack?.({ ok: false, error: 'Join a room first.' });
+          return;
+        }
+        const { room, activeSeat } = ctx;
+        if (activeSeat.index !== room.hostIndex) {
+          const msg = 'Only the host can start the match.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+        if (room.turn !== 'waiting') {
+          ack?.({ ok: false, error: 'The match has already started.' });
+          return;
+        }
+
+        const fillCpus = Boolean(payload?.fillCpus);
+        const readyCount = room.seats.filter((s) => s.clientId !== null || s.isCpu).length;
+        if (!fillCpus && readyCount < 2) {
+          const msg = 'Wait for at least 1 other player to join, or start with CPUs.';
+          sendError(socket, msg);
+          ack?.({ ok: false, error: msg });
+          return;
+        }
+
+        if (!fillCpus && readyCount < room.playerCount) {
+          const activeHostClientId = room.seats[room.hostIndex]?.clientId ?? null;
+          room.seats = room.seats.filter((s) => s.clientId !== null || s.isCpu);
+          room.seats.forEach((s, idx) => {
+            s.index = idx;
+          });
+          room.playerCount = room.seats.length;
+          const nextHostIdx = activeHostClientId
+            ? room.seats.findIndex((s) => s.clientId === activeHostClientId)
+            : 0;
+          room.hostIndex = nextHostIdx >= 0 ? nextHostIdx : 0;
+          room.kickVotes.clear();
+        }
+
+        ack?.({ ok: true });
+        startFreshRound(room, undefined, fillCpus, false);
+      }
+    );
 
     socket.on('restart', (payload?: RestartPayload) => {
       const ctx = getBoundContext();
       if (!ctx) return;
       const nextDiff = isDifficultyLevel(payload?.difficulty) ? payload.difficulty : undefined;
-      startFreshRound(ctx.room, nextDiff, false);
+      const keepWaiting = ctx.room.turn === 'waiting';
+      startFreshRound(ctx.room, nextDiff, false, keepWaiting);
     });
 
     socket.on('call_uno', () => {
@@ -1205,7 +1679,12 @@ export function attachMultiplayerServer(
       activeSeat.unoArmed = true;
       room.message = `${activeSeat.name} called UNO! Play your card.`;
       broadcastRoom(room, (seatIdx) => [
-        { kind: 'uno', whoName: activeSeat.name, isSelf: seatIdx === activeSeat.index },
+        {
+          kind: 'uno',
+          whoName: activeSeat.name,
+          isSelf: seatIdx === activeSeat.index,
+          seatIndex: activeSeat.index,
+        },
       ]);
     });
 
@@ -1228,6 +1707,7 @@ export function attachMultiplayerServer(
           const res = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
           if (res.reshuffled) effs.push({ kind: 'reshuffle' });
         }
+        effs.push({ kind: 'seat_draw', seatIndex: activeSeat.index, count: stackCount });
         room.pendingDrawStack = 0;
         room.pendingDrawMin = 0;
         room.drawnUid = null;
@@ -1238,8 +1718,8 @@ export function attachMultiplayerServer(
         room.turn = room.turnIndex === 0 ? 'host' : 'guest';
         const nextSeat = room.seats[room.turnIndex];
         room.message = `${activeSeat.name} drew ${stackCount} cards! ${nextSeat.name}'s turn.`;
-        broadcastRoom(room, () => effs);
         scheduleCpuIfNeeded(room);
+        broadcastRoom(room, () => effs);
         return;
       }
 
@@ -1250,6 +1730,9 @@ export function attachMultiplayerServer(
 
       const { card, reshuffled } = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
       const effects: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
+      if (card) {
+        effects.push({ kind: 'seat_draw', seatIndex: activeSeat.index, count: 1 });
+      }
 
       if (handleMercyKnockout(room, activeSeat, effects)) return;
 
@@ -1259,8 +1742,8 @@ export function attachMultiplayerServer(
         room.drawnUid = null;
         const nextSeat = room.seats[room.turnIndex];
         room.message = `Deck empty — turn passes to ${nextSeat.name}.`;
-        broadcastRoom(room, () => effects);
         scheduleCpuIfNeeded(room);
+        broadcastRoom(room, () => effects);
         return;
       }
 
@@ -1269,6 +1752,7 @@ export function attachMultiplayerServer(
       room.message = canPlayCard(card, top, room.currentColor)
         ? `${activeSeat.name} drew a playable card — play it or pass.`
         : `${activeSeat.name} drew a card with no match — pass turn.`;
+      scheduleCpuIfNeeded(room);
       broadcastRoom(room, () => effects);
     });
 
@@ -1289,8 +1773,8 @@ export function attachMultiplayerServer(
       room.turn = room.turnIndex === 0 ? 'host' : 'guest';
       const nextSeat = room.seats[room.turnIndex];
       room.message = `${nextSeat.name}'s turn — color is ${room.currentColor}.`;
-      broadcastRoom(room);
       scheduleCpuIfNeeded(room);
+      broadcastRoom(room);
     });
 
     socket.on('play', (payload: PlayCardPayload) => {
@@ -1338,11 +1822,13 @@ export function attachMultiplayerServer(
     });
 
     socket.on('disconnect', () => {
-      if (!boundRoomId || boundSeatIndex === null) return;
+      if (!boundRoomId) return;
       const room = rooms.get(boundRoomId);
       if (!room) return;
-      const seat = room.seats[boundSeatIndex];
-      if (seat && seat.socketId === socket.id) {
+      const seat = room.seats.find(
+        (s) => s.socketId === socket.id || (boundClientId !== null && s.clientId === boundClientId && s.socketId === socket.id)
+      );
+      if (seat) {
         seat.socketId = null;
         if (room.turn === 'host' || room.turn === 'guest') {
           room.message = `${seat.name} disconnected — waiting to reconnect...`;

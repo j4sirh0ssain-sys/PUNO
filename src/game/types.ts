@@ -111,10 +111,14 @@ export interface SeatInfo {
   name: string;
   isCpu: boolean;
   connected: boolean;
+  occupied?: boolean;
   cardCount: number;
   unoArmed: boolean;
   eliminated: boolean;
   score: number;
+  kickVotes?: number;
+  kickVotesRequired?: number;
+  votedToKickBySelf?: boolean;
 }
 
 export type EffectEvent =
@@ -122,6 +126,12 @@ export type EffectEvent =
       kind: 'impact';
       card: Card;
       activeColor: SuitColor;
+      seatIndex?: number;
+    }
+  | {
+      kind: 'seat_draw';
+      seatIndex: number;
+      count: number;
     }
   | {
       kind: 'banner';
@@ -139,28 +149,33 @@ export type EffectEvent =
       kind: 'uno';
       whoName: string;
       isSelf: boolean;
+      seatIndex?: number;
     }
   | {
       kind: 'uno_penalty';
       whoName: string;
       isSelf: boolean;
+      seatIndex?: number;
     }
   | {
       kind: 'roulette';
       whoName: string;
       color: SuitColor;
       drawnCount: number;
+      seatIndex?: number;
     }
   | {
       kind: 'dump';
       whoName: string;
       color: SuitColor;
       count: number;
+      seatIndex?: number;
     }
   | {
       kind: 'mercy_ko';
       loserName: string;
       isSelfLoser: boolean;
+      seatIndex?: number;
     }
   | {
       kind: 'win';
@@ -209,6 +224,10 @@ export interface ClientGameView {
   };
   message: string;
   roundId: number;
+  hostIndex?: number;
+  turnDeadlineAt?: number | null;
+  turnDurationMs?: number;
+  serverNow?: number;
 }
 
 export type ServerWsMessage =
@@ -236,6 +255,7 @@ export type ClientWsAction =
     }
   | {
       type: 'start_now';
+      fillCpus?: boolean;
     }
   | {
       type: 'play';
@@ -258,6 +278,14 @@ export type ClientWsAction =
   | {
       type: 'rename';
       name: string;
+    }
+  | {
+      type: 'kick_player';
+      seatIndex: number;
+    }
+  | {
+      type: 'vote_kick';
+      seatIndex: number;
     }
   | {
       type: 'ping';

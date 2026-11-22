@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { Check, Copy, Play, X } from 'lucide-react';
+import { Check, Copy, Play, ThumbsDown, UserX, X } from 'lucide-react';
 import type { TableTheme } from '../game/themes.ts';
 import type { SeatInfo } from '../game/types.ts';
 
@@ -9,11 +9,18 @@ interface QrInviteModalProps {
   roomId: string;
   playerCount: number;
   seats: SeatInfo[];
+  selfIndex?: number;
+  hostIndex?: number;
   isHost: boolean;
   isWaiting: boolean;
   opponentConnected: boolean;
   opponentName: string;
   theme?: TableTheme;
+  kickingSeatIndex?: number | null;
+  votingSeatIndex?: number | null;
+  onKickPlayer?: (seatIndex: number) => void;
+  onVoteKick?: (seatIndex: number) => void;
+  onStartMatch?: () => void;
   onStartWithCpus?: () => void;
   onClose: () => void;
 }
@@ -23,11 +30,18 @@ export function QrInviteModal({
   roomId,
   playerCount,
   seats,
+  selfIndex = 0,
+  hostIndex = 0,
   isHost,
   isWaiting,
   opponentConnected,
   opponentName,
   theme,
+  kickingSeatIndex = null,
+  votingSeatIndex = null,
+  onKickPlayer,
+  onVoteKick,
+  onStartMatch,
   onStartWithCpus,
   onClose,
 }: QrInviteModalProps) {
@@ -68,7 +82,10 @@ export function QrInviteModal({
     }
   };
 
-  const readyCount = seats.filter((s) => s.connected).length;
+  const readyCount = seats.filter((s) => s.isCpu || (s.occupied ?? s.connected)).length;
+  const humanCount = seats.filter((s) => !s.isCpu && (s.occupied ?? s.connected)).length;
+  const canStartHumans = isHost && isWaiting && readyCount >= 2;
+  const hasOpenSeats = isHost && isWaiting && readyCount < playerCount;
 
   return (
     <div
@@ -133,33 +150,108 @@ export function QrInviteModal({
         <div className="text-xs font-mono-tabular text-[#b8c7c5] mb-3">
           {playerCount === 2
             ? opponentConnected
-              ? `${opponentName} connected`
+              ? `${opponentName} connected · Ready to start`
               : 'Waiting for player to join'
-            : `${readyCount} of ${playerCount} seats ready`}
+            : readyCount >= playerCount
+              ? `All ${playerCount} players connected · Ready to start`
+              : `${readyCount} of ${playerCount} seats ready`}
         </div>
 
-        {playerCount > 2 && seats.length > 0 && (
-          <div className="grid grid-cols-2 gap-1.5 text-left mb-4">
-            {seats.map((seat) => (
-              <div
-                key={seat.index}
-                className="flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs"
-                style={{
-                  backgroundColor: seat.connected ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.2)',
-                  borderColor: theme?.surfaceBorder ?? '#284452',
-                }}
-              >
-                <span className="truncate font-semibold text-[#f4f4ed]">
-                  {seat.name}
-                </span>
-                <span
-                  className="text-[11px] font-mono-tabular ml-2 shrink-0"
-                  style={{ color: seat.connected ? theme?.accent ?? '#34d399' : '#7f9391' }}
+        {seats.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-left mb-4">
+            {seats.map((seat) => {
+              const isOccupiedHuman = !seat.isCpu && (seat.occupied ?? seat.connected);
+              const isSeatHost = seat.index === hostIndex;
+              const isSelf = seat.index === selfIndex;
+              const canHostKick = Boolean(
+                isHost && onKickPlayer && !isSeatHost && isOccupiedHuman
+              );
+              const canVoteKick = Boolean(
+                onVoteKick && !isSelf && isOccupiedHuman && humanCount >= 3
+              );
+              const isKicking = kickingSeatIndex === seat.index;
+              const isVoting = votingSeatIndex === seat.index;
+              const votes = seat.kickVotes ?? 0;
+              const required = seat.kickVotesRequired ?? 2;
+
+              return (
+                <div
+                  key={seat.index}
+                  className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-xs"
+                  style={{
+                    backgroundColor:
+                      seat.connected || isOccupiedHuman
+                        ? 'rgba(255,255,255,0.05)'
+                        : 'rgba(0,0,0,0.2)',
+                    borderColor: theme?.surfaceBorder ?? '#284452',
+                  }}
                 >
-                  {seat.isCpu ? 'CPU' : seat.connected ? 'Ready' : 'Open'}
-                </span>
-              </div>
-            ))}
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <span className="truncate font-semibold text-[#f4f4ed]">
+                      {seat.name}
+                    </span>
+                    <span
+                      className="text-[11px] font-mono-tabular shrink-0"
+                      style={{
+                        color: seat.connected
+                          ? theme?.accent ?? '#34d399'
+                          : isOccupiedHuman
+                            ? '#fbbf24'
+                            : '#7f9391',
+                      }}
+                    >
+                      {seat.isCpu
+                        ? 'CPU'
+                        : isSeatHost
+                          ? 'Host'
+                          : seat.connected
+                            ? 'Ready'
+                            : isOccupiedHuman
+                              ? 'Offline'
+                              : 'Open'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {canVoteKick && (
+                      <button
+                        type="button"
+                        disabled={isVoting}
+                        onClick={() => onVoteKick?.(seat.index)}
+                        aria-label={`Vote to kick ${seat.name}`}
+                        title={
+                          seat.votedToKickBySelf
+                            ? `Withdraw kick vote (${votes}/${required})`
+                            : `Vote to kick ${seat.name} (${votes}/${required})`
+                        }
+                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-bold disabled:opacity-50 transition-colors focus-visible:outline-2 focus-visible:outline-white ${
+                          seat.votedToKickBySelf
+                            ? 'bg-[#fb923c]/25 border-[#fb923c]/60 text-[#fed7aa]'
+                            : 'bg-white/5 hover:bg-white/10 border-white/15 text-[#d6e2e0]'
+                        }`}
+                      >
+                        <ThumbsDown className="w-3 h-3" />
+                        <span className="font-mono-tabular">
+                          {votes}/{required}
+                        </span>
+                      </button>
+                    )}
+                    {canHostKick && (
+                      <button
+                        type="button"
+                        disabled={isKicking}
+                        onClick={() => onKickPlayer?.(seat.index)}
+                        aria-label={`Kick ${seat.name}`}
+                        title={`Kick ${seat.name}`}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[#ee3f4f]/15 hover:bg-[#ee3f4f]/30 border border-[#ee3f4f]/40 text-[11px] font-bold text-[#ffb4bc] disabled:opacity-50 transition-colors focus-visible:outline-2 focus-visible:outline-white"
+                      >
+                        <UserX className="w-3 h-3" />
+                        <span>{isKicking ? '...' : 'Kick'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -182,12 +274,35 @@ export function QrInviteModal({
         </div>
 
         <div className="flex flex-col gap-2">
-          {isHost && isWaiting && playerCount > 2 && onStartWithCpus && (
+          {canStartHumans && onStartMatch && (
+            <button
+              type="button"
+              onClick={onStartMatch}
+              className="w-full h-11 px-4 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap inline-flex items-center justify-center gap-2 focus-visible:outline-2 focus-visible:outline-white"
+              style={{ backgroundColor: theme?.accent ?? '#f5c84b' }}
+            >
+              <Play className="w-4 h-4 fill-current" />
+              <span>
+                {readyCount < playerCount
+                  ? `Start Game (${readyCount} Players)`
+                  : 'Start Game'}
+              </span>
+            </button>
+          )}
+          {hasOpenSeats && onStartWithCpus && (
             <button
               type="button"
               onClick={onStartWithCpus}
-              className="w-full h-11 px-4 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap inline-flex items-center justify-center gap-2 focus-visible:outline-2 focus-visible:outline-white"
-              style={{ backgroundColor: theme?.accent ?? '#f5c84b' }}
+              className={`w-full h-11 px-4 rounded-xl font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap inline-flex items-center justify-center gap-2 focus-visible:outline-2 focus-visible:outline-white ${
+                canStartHumans
+                  ? 'bg-white/10 text-[#f4f4ed] hover:bg-white/15'
+                  : 'text-[#151c27]'
+              }`}
+              style={
+                !canStartHumans
+                  ? { backgroundColor: theme?.accent ?? '#f5c84b' }
+                  : undefined
+              }
             >
               <Play className="w-4 h-4 fill-current" />
               <span>Start Now (Fill Open Seats with CPUs)</span>
@@ -197,12 +312,12 @@ export function QrInviteModal({
             type="button"
             onClick={onClose}
             className={`w-full h-11 px-4 rounded-xl font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white ${
-              isHost && isWaiting && playerCount > 2
+              canStartHumans || hasOpenSeats
                 ? 'bg-white/10 text-[#f4f4ed] hover:bg-white/15'
                 : 'text-[#151c27]'
             }`}
             style={
-              !(isHost && isWaiting && playerCount > 2)
+              !(canStartHumans || hasOpenSeats)
                 ? { backgroundColor: theme?.accent ?? '#f5c84b' }
                 : undefined
             }

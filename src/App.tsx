@@ -2,21 +2,26 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertTriangle,
+  Clock,
   Crown,
   Flame,
   Megaphone,
   Palette,
+  Play,
   QrCode,
   RotateCcw,
   Skull,
   Sparkles,
   Star,
+  ThumbsDown,
   Trophy,
   User,
+  UserX,
   Users,
   Volume2,
   VolumeX,
   Wifi,
+  X,
 } from 'lucide-react';
 import { io, type Socket } from 'socket.io-client';
 import { HomeBackdrop, PunoLogo } from './components/HomeVisuals.tsx';
@@ -384,7 +389,8 @@ export default function App() {
     const cleaned = raw ? raw.trim() : '';
     return cleaned || null;
   }, [urlParams]);
-  const isGuestInvite = Boolean(inviteRoomParam && inviteTokenParam);
+  const [inviteDismissed, setInviteDismissed] = useState(false);
+  const isGuestInvite = Boolean(inviteRoomParam && inviteTokenParam && !inviteDismissed);
 
   const [screen, setScreen] = useState<ScreenState>('TITLE_MENU');
   const [mode, setMode] = useState<GameMode>(isGuestInvite ? 'multiplayer' : 'solo');
@@ -445,6 +451,12 @@ export default function App() {
   const [roomToken, setRoomToken] = useState<string | null>(inviteTokenParam);
   const [joinCodeDraft, setJoinCodeDraft] = useState('');
   const [showQrModal, setShowQrModal] = useState(false);
+  const [showPlayersModal, setShowPlayersModal] = useState(false);
+  const [kickingSeatIndex, setKickingSeatIndex] = useState<number | null>(null);
+  const [votingSeatIndex, setVotingSeatIndex] = useState<number | null>(null);
+  const [startingMatch, setStartingMatch] = useState(false);
+  const [turnSecondsLeft, setTurnSecondsLeft] = useState<number | null>(null);
+  const clockOffsetRef = useRef<number>(0);
   const [roomBusy, setRoomBusy] = useState(false);
   const [networkError, setNetworkError] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<'idle' | 'connecting' | 'connected' | 'reconnecting'>('idle');
@@ -457,6 +469,9 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<PunoCanvasEngine | null>(null);
+  const pendingEffectsRef = useRef<EffectEvent[]>([]);
+  const lastSyncedViewRef = useRef<ClientGameView | null>(null);
+  const [hudTop, setHudTop] = useState<number | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const joinTimeoutRef = useRef<number | null>(null);
   const activeJoinNameRef = useRef<string>(playerName);
@@ -542,6 +557,8 @@ export default function App() {
     for (const eff of effects) {
       if (eff.kind === 'deal') {
         soundFx.playDeal();
+      } else if (eff.kind === 'seat_draw') {
+        soundFx.playDraw();
       } else if (eff.kind === 'impact') {
         if (['+6', '+10', 'Roulette', 'Dump', 'Skip All'].includes(eff.card.value)) {
           soundFx.playMegaPower();
@@ -618,8 +635,13 @@ export default function App() {
       if (s.turn === 'over' && s.winner) {
         setScreen('GAME_OVER');
       }
-      engineRef.current?.syncView(view, effects);
-      playSoundForEffects(effects);
+      if (engineRef.current) {
+        engineRef.current.syncView(view, effects);
+        lastSyncedViewRef.current = view;
+        playSoundForEffects(effects);
+      } else if (effects.length > 0) {
+        pendingEffectsRef.current.push(...effects);
+      }
     },
     [playSoundForEffects]
   );
@@ -745,7 +767,7 @@ export default function App() {
     const isSelfLoser = loserSeat.index === 0;
     const koEffects: EffectEvent[] = [
       ...baseEffects,
-      { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser },
+      { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser, seatIndex: loserSeat.index },
     ];
 
     if (alive.length <= 1 || isSelfLoser) {
@@ -830,7 +852,7 @@ export default function App() {
 
       if (s.pendingDrawStack > 0 && !chosen) {
         const stackCount = s.pendingDrawStack;
-        const effs: EffectEvent[] = [];
+        const effs: EffectEvent[] = [{ kind: 'seat_draw', seatIndex: cpuSeat.index, count: stackCount }];
         for (let i = 0; i < stackCount; i++) {
           const res = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
           if (res.reshuffled) effs.push({ kind: 'reshuffle' });
@@ -861,7 +883,10 @@ export default function App() {
 
       if (!chosen) {
         const { card, reshuffled } = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
-        const effs: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
+        const effs: EffectEvent[] = [
+          ...(card ? [{ kind: 'seat_draw', seatIndex: cpuSeat.index, count: 1 } as EffectEvent] : []),
+          ...(reshuffled ? [{ kind: 'reshuffle' } as EffectEvent] : []),
+        ];
         soundFx.playDraw();
 
         if (triggerSoloMercyKo(s, cpuSeat, expectedRound, effs)) return;
@@ -931,12 +956,13 @@ export default function App() {
           whoName: cpuSeat.name,
           color: nextColor,
           count: extras.length + 1,
+          seatIndex: cpuSeat.index,
         });
       }
 
       s.discard.push(card);
       s.currentColor = nextColor;
-      effects.push({ kind: 'impact', card, activeColor: nextColor });
+      effects.push({ kind: 'impact', card, activeColor: nextColor, seatIndex: cpuSeat.index });
 
       if (cpuSeat.hand.length === 0) {
         s.pendingDrawStack = 0;
@@ -969,14 +995,15 @@ export default function App() {
       let cpuForgotUno = false;
       if (cpuSeat.hand.length === 1) {
         if (shouldCpuCallUno(s.difficulty)) {
-          effects.push({ kind: 'uno', whoName: cpuSeat.name, isSelf: false });
+          effects.push({ kind: 'uno', whoName: cpuSeat.name, isSelf: false, seatIndex: cpuSeat.index });
         } else {
           cpuForgotUno = true;
           for (let i = 0; i < 2; i++) {
             const res = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
-          effects.push({ kind: 'uno_penalty', whoName: cpuSeat.name, isSelf: false });
+          effects.push({ kind: 'uno_penalty', whoName: cpuSeat.name, isSelf: false, seatIndex: cpuSeat.index });
+          effects.push({ kind: 'seat_draw', seatIndex: cpuSeat.index, count: 2 });
         }
       }
 
@@ -1015,6 +1042,7 @@ export default function App() {
             const res = drawOneFromDeck(s.deck, s.discard, victimSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
+          effects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: drawAmount });
           const nextIdx = advanceSoloIndex(s, 2);
           const nextSeat = s.seats[nextIdx];
           s.message = `${cpuSeat.name} played ${card.value} — ${victimSeat.name} draws ${drawAmount}!`;
@@ -1034,7 +1062,11 @@ export default function App() {
           whoName: victimSeat.name,
           color: nextColor,
           drawnCount: rRes.drawnCount,
+          seatIndex: victimSeat.index,
         });
+        if (rRes.drawnCount > 0) {
+          effects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: rRes.drawnCount });
+        }
 
         if (triggerSoloMercyKo(s, victimSeat, expectedRound, effects)) return;
 
@@ -1111,13 +1143,14 @@ export default function App() {
           whoName: selfSeat.name,
           color: chosenColor,
           count: extras.length + 1,
+          seatIndex: 0,
         });
       }
 
       s.discard.push(card);
       s.currentColor = chosenColor;
       s.drawnUid = null;
-      effects.push({ kind: 'impact', card, activeColor: chosenColor });
+      effects.push({ kind: 'impact', card, activeColor: chosenColor, seatIndex: 0 });
 
       if (selfSeat.hand.length === 0) {
         s.pendingDrawStack = 0;
@@ -1199,6 +1232,7 @@ export default function App() {
             const res = drawOneFromDeck(s.deck, s.discard, victimSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
+          effects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: drawAmount });
           const nextIdx = advanceSoloIndex(s, 2);
           const nextSeat = s.seats[nextIdx];
           s.message = penalizedUno
@@ -1220,7 +1254,11 @@ export default function App() {
           whoName: victimSeat.name,
           color: chosenColor,
           drawnCount: rRes.drawnCount,
+          seatIndex: victimSeat.index,
         });
+        if (rRes.drawnCount > 0) {
+          effects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: rRes.drawnCount });
+        }
 
         if (triggerSoloMercyKo(s, victimSeat, expectedRound, effects)) return;
 
@@ -1297,6 +1335,8 @@ export default function App() {
       oldSocket.removeAllListeners();
       oldSocket.disconnect();
     }
+    pendingEffectsRef.current = [];
+    lastSyncedViewRef.current = null;
     clearMultiplayerSession();
     setRoomBusy(false);
     setWsStatus('idle');
@@ -1386,7 +1426,12 @@ export default function App() {
         if (socketRef.current !== socket || !msg?.view) return;
         receivedState = true;
         clearJoinTimeout();
+        if (typeof msg.view.serverNow === 'number') {
+          clockOffsetRef.current = msg.view.serverNow - Date.now();
+        }
         setRoomBusy(false);
+        setStartingMatch(false);
+        setVotingSeatIndex(null);
         setNetworkError(null);
         setMode('multiplayer');
         setMultiView(msg.view);
@@ -1408,15 +1453,56 @@ export default function App() {
           }
           return eff;
         });
-        engineRef.current?.syncView(msg.view, enrichedEffects);
-        playSoundForEffects(enrichedEffects);
+        if (engineRef.current) {
+          engineRef.current.syncView(msg.view, enrichedEffects);
+          lastSyncedViewRef.current = msg.view;
+          playSoundForEffects(enrichedEffects);
+        } else if (enrichedEffects.length > 0) {
+          pendingEffectsRef.current.push(...enrichedEffects);
+        }
       });
 
       socket.on('game_error', (payload: { message?: string }) => {
         if (socketRef.current !== socket) return;
         clearJoinTimeout();
         setRoomBusy(false);
+        setStartingMatch(false);
+        setKickingSeatIndex(null);
+        setVotingSeatIndex(null);
         setNetworkError(payload?.message || 'Multiplayer error.');
+        soundFx.playError();
+      });
+
+      socket.on('kicked', (payload: { roomId?: string; message?: string }) => {
+        if (socketRef.current !== socket) return;
+        clearJoinTimeout();
+        socketRef.current = null;
+        socket.removeAllListeners();
+        socket.disconnect();
+        pendingEffectsRef.current = [];
+        lastSyncedViewRef.current = null;
+        clearMultiplayerSession();
+        modeRef.current = 'solo';
+        roomIdRef.current = null;
+        roomTokenRef.current = null;
+        setRoomId(null);
+        setRoomToken(null);
+        setMultiView(null);
+        setShowQrModal(false);
+        setShowPlayersModal(false);
+        setPendingWildUid(null);
+        setKickingSeatIndex(null);
+        setVotingSeatIndex(null);
+        setStartingMatch(false);
+        setRoomBusy(false);
+        setWsStatus('idle');
+        setMode('solo');
+        setInviteDismissed(true);
+        if (window.location.search) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        setScreen('TITLE_MENU');
+        setNetworkError(payload?.message || 'You were removed from the room.');
         soundFx.playError();
       });
 
@@ -1839,16 +1925,25 @@ export default function App() {
   useEffect(() => {
     if (screen === 'TITLE_MENU') {
       engineRef.current = null;
+      lastSyncedViewRef.current = null;
+      setHudTop(null);
       return;
     }
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    const engine = new PunoCanvasEngine(canvas, themeId);
+    const engine = new PunoCanvasEngine(canvas, themeId, (metrics) => {
+      setHudTop(metrics.hudTop);
+    });
     engineRef.current = engine;
     if (activeView) {
-      engine.syncView(activeView, []);
+      const queued = pendingEffectsRef.current.splice(0);
+      engine.syncView(activeView, queued);
+      lastSyncedViewRef.current = activeView;
+      if (queued.length > 0) {
+        playSoundForEffects(queued);
+      }
     }
 
     const observer = new ResizeObserver((entries) => {
@@ -1877,14 +1972,103 @@ export default function App() {
   }, [screen]);
 
   useEffect(() => {
-    if (activeView && engineRef.current) {
-      engineRef.current.syncView(activeView, []);
+    if (activeView && engineRef.current && lastSyncedViewRef.current !== activeView) {
+      const queued = pendingEffectsRef.current.splice(0);
+      engineRef.current.syncView(activeView, queued);
+      lastSyncedViewRef.current = activeView;
+      if (queued.length > 0) {
+        playSoundForEffects(queued);
+      }
     }
-  }, [activeView]);
+  }, [activeView, playSoundForEffects]);
+
+  const handleKickPlayer = useCallback((seatIndex: number) => {
+    const socket = socketRef.current;
+    if (!socket || !socket.connected) {
+      setNetworkError('Not connected to the multiplayer server.');
+      return;
+    }
+    setKickingSeatIndex(seatIndex);
+    socket.emit(
+      'kick_player',
+      { seatIndex },
+      (res?: { ok?: boolean; error?: string }) => {
+        setKickingSeatIndex(null);
+        if (res && res.ok === false && res.error) {
+          setNetworkError(res.error);
+          soundFx.playError();
+        }
+      }
+    );
+  }, []);
+
+  const handleVoteKick = useCallback((seatIndex: number) => {
+    const socket = socketRef.current;
+    if (!socket || !socket.connected) {
+      setNetworkError('Not connected to the multiplayer server.');
+      return;
+    }
+    setVotingSeatIndex(seatIndex);
+    socket.emit(
+      'vote_kick',
+      { seatIndex },
+      (res?: { ok?: boolean; error?: string }) => {
+        setVotingSeatIndex(null);
+        if (res && res.ok === false && res.error) {
+          setNetworkError(res.error);
+          soundFx.playError();
+        }
+      }
+    );
+  }, []);
+
+  const handleStartMultiplayerMatch = useCallback((fillCpus = false) => {
+    const socket = socketRef.current;
+    if (!socket || !socket.connected) {
+      setNetworkError('Not connected to the multiplayer server.');
+      return;
+    }
+    setStartingMatch(true);
+    socket.emit(
+      'start_now',
+      { fillCpus },
+      (res?: { ok?: boolean; error?: string }) => {
+        setStartingMatch(false);
+        if (res && res.ok === false && res.error) {
+          setNetworkError(res.error);
+          soundFx.playError();
+        } else {
+          setShowQrModal(false);
+        }
+      }
+    );
+  }, []);
+
+  useEffect(() => {
+    if (
+      screen !== 'PLAYING' ||
+      mode !== 'multiplayer' ||
+      !activeView ||
+      (activeView.turn !== 'host' && activeView.turn !== 'guest') ||
+      typeof activeView.turnDeadlineAt !== 'number'
+    ) {
+      setTurnSecondsLeft(null);
+      return;
+    }
+    const deadlineAt = activeView.turnDeadlineAt;
+    const updateRemaining = () => {
+      const serverNowEstimate = Date.now() + clockOffsetRef.current;
+      const secs = Math.max(0, Math.ceil((deadlineAt - serverNowEstimate) / 1000));
+      setTurnSecondsLeft(secs);
+    };
+    updateRemaining();
+    const id = window.setInterval(updateRemaining, 200);
+    return () => window.clearInterval(id);
+  }, [activeView, mode, screen]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (showNameModal || showQrModal || screen === 'TITLE_MENU') return;
+      if (showNameModal || showQrModal || showPlayersModal || screen === 'TITLE_MENU') return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       if (pendingWildUid !== null) {
@@ -1905,7 +2089,7 @@ export default function App() {
         e.preventDefault();
         if (screen === 'GAME_OVER') {
           handleRestartRound();
-        } else {
+        } else if (activeView?.turn !== 'waiting') {
           handleDrawOrPass();
         }
       } else if (e.key === 'u' || e.key === 'U') {
@@ -1919,6 +2103,7 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    activeView?.turn,
     handleCallUno,
     handleDrawOrPass,
     handleRestartRound,
@@ -1926,6 +2111,7 @@ export default function App() {
     pendingWildUid,
     screen,
     showNameModal,
+    showPlayersModal,
     showQrModal,
   ]);
 
@@ -1941,7 +2127,15 @@ export default function App() {
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const engine = engineRef.current;
     const canvas = canvasRef.current;
-    if (!engine || !canvas || screen !== 'PLAYING' || pendingWildUid !== null) return;
+    if (
+      !engine ||
+      !canvas ||
+      screen !== 'PLAYING' ||
+      pendingWildUid !== null ||
+      activeView?.turn === 'waiting'
+    ) {
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const hit = engine.hitTest(e.clientX - rect.left, e.clientY - rect.top);
     if (!hit) return;
@@ -2111,6 +2305,36 @@ export default function App() {
           >
             {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
+
+          {screen !== 'TITLE_MENU' && mode === 'multiplayer' && multiView && (() => {
+            const activeKickVotes = multiView.seats.reduce(
+              (sum, s) => sum + (s.kickVotes ?? 0),
+              0
+            );
+            return (
+              <button
+                type="button"
+                onClick={() => setShowPlayersModal(true)}
+                className="h-10 inline-flex items-center gap-1.5 px-3 rounded-xl text-xs sm:text-sm font-semibold text-[#f4f4ed] border transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-white"
+                style={{
+                  backgroundColor: activeTheme.surface,
+                  borderColor: activeKickVotes > 0 ? '#fb923c' : activeTheme.surfaceBorder,
+                }}
+                title="View room players, vote kick & manage seats"
+                aria-label="Room players"
+              >
+                <Users className="w-4 h-4" style={{ color: activeTheme.accent }} />
+                <span className="hidden sm:inline">Players</span>
+                <span className="text-[11px] font-mono-tabular text-[#9fb3b0]">
+                  {multiView.seats.filter((s) => s.isCpu || (s.occupied ?? s.connected)).length}/
+                  {multiView.playerCount}
+                </span>
+                {activeKickVotes > 0 && (
+                  <span className="text-[11px] font-bold text-[#fb923c]">· Vote</span>
+                )}
+              </button>
+            );
+          })()}
 
           {screen !== 'TITLE_MENU' && mode === 'multiplayer' && roomId && (
             <button
@@ -2614,6 +2838,91 @@ export default function App() {
             )}
 
             {activeView && screen === 'PLAYING' && (() => {
+              const isWaitingLobby = mode === 'multiplayer' && activeView.turn === 'waiting';
+              const activeHostIndex = activeView.hostIndex ?? 0;
+              const isRoomHost = activeView.selfIndex === activeHostIndex;
+              const hostSeatName = activeView.seats[activeHostIndex]?.name ?? 'Host';
+              const readySeatsCount = activeView.seats.filter(
+                (s) => s.isCpu || (s.occupied ?? s.connected)
+              ).length;
+              const hasOpenSeats = readySeatsCount < activeView.playerCount;
+
+              if (isWaitingLobby) {
+                return (
+                  <div
+                    className={`pointer-events-none absolute inset-x-0 flex flex-col items-center gap-2 px-4 z-10 ${
+                      hudTop === null ? 'bottom-[152px] sm:bottom-[178px]' : ''
+                    }`}
+                    style={hudTop !== null ? { top: `${hudTop}px` } : undefined}
+                  >
+                    <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2">
+                      {isRoomHost ? (
+                        <>
+                          <motion.button
+                            whileHover={readySeatsCount >= 2 && !startingMatch ? { scale: 1.04 } : undefined}
+                            whileTap={readySeatsCount >= 2 && !startingMatch ? { scale: 0.96 } : undefined}
+                            type="button"
+                            disabled={readySeatsCount < 2 || startingMatch}
+                            onClick={() => handleStartMultiplayerMatch(false)}
+                            className="h-10 sm:h-11 px-5 rounded-xl text-[#151c27] text-xs sm:text-sm font-extrabold shadow-lg transition-opacity hover:opacity-90 disabled:opacity-45 whitespace-nowrap inline-flex items-center gap-2 focus-visible:outline-2 focus-visible:outline-white"
+                            style={{ backgroundColor: activeTheme.accent }}
+                          >
+                            <Play className="w-4 h-4 fill-current" />
+                            <span>
+                              {startingMatch
+                                ? 'Starting...'
+                                : readySeatsCount >= 2 && hasOpenSeats
+                                  ? `Start Game (${readySeatsCount} Players)`
+                                  : 'Start Game'}
+                            </span>
+                          </motion.button>
+                          {hasOpenSeats && (
+                            <motion.button
+                              whileHover={!startingMatch ? { scale: 1.03 } : undefined}
+                              whileTap={!startingMatch ? { scale: 0.97 } : undefined}
+                              type="button"
+                              disabled={startingMatch}
+                              onClick={() => handleStartMultiplayerMatch(true)}
+                              className="h-10 sm:h-11 px-4 rounded-xl text-xs sm:text-sm font-bold text-[#f4f4ed] border hover:bg-white/10 transition-colors disabled:opacity-45 whitespace-nowrap inline-flex items-center gap-1.5 focus-visible:outline-2 focus-visible:outline-white"
+                              style={{
+                                backgroundColor: `${activeTheme.surface}eb`,
+                                borderColor: activeTheme.surfaceBorder,
+                              }}
+                            >
+                              <Users className="w-4 h-4" style={{ color: activeTheme.accent }} />
+                              <span>Start with CPUs</span>
+                            </motion.button>
+                          )}
+                        </>
+                      ) : (
+                        <div
+                          className="h-10 px-4 rounded-xl border text-xs sm:text-sm font-bold text-[#f4f4ed] inline-flex items-center gap-2 shadow-md backdrop-blur-sm"
+                          style={{
+                            backgroundColor: `${activeTheme.surface}e6`,
+                            borderColor: activeTheme.accent,
+                          }}
+                        >
+                          <Clock className="w-4 h-4" style={{ color: activeTheme.accent }} />
+                          <span>
+                            Waiting for {hostSeatName} to start ({readySeatsCount}/{activeView.playerCount})
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div
+                      className="pointer-events-auto px-3.5 py-1.5 rounded-xl border text-xs sm:text-sm font-medium text-[#e6eeec] text-center max-w-md shadow-md backdrop-blur-sm inline-flex items-center gap-2"
+                      style={{
+                        backgroundColor: `${activeTheme.surface}e0`,
+                        borderColor: activeTheme.surfaceBorder,
+                      }}
+                    >
+                      <span>{networkError || activeView.message}</span>
+                    </div>
+                  </div>
+                );
+              }
+
               const hasStack = activeView.pendingDrawStack > 0;
               const mustCallUno =
                 isMyTurn &&
@@ -2628,44 +2937,76 @@ export default function App() {
                   (activeView.difficulty === 'no_mercy' &&
                     activeView.selfHand.length >= 2 &&
                     activeView.selfHand.some((c) => c.value === 'Dump')));
+              const isLowTime = turnSecondsLeft !== null && turnSecondsLeft <= 5;
+              const isWarnTime = turnSecondsLeft !== null && turnSecondsLeft <= 10 && !isLowTime;
 
               return (
                 <>
-                  <div className="pointer-events-none absolute inset-x-0 bottom-[178px] sm:bottom-[206px] flex flex-col items-center gap-2 px-4">
-                    <motion.button
-                      whileHover={isMyTurn ? { scale: 1.04 } : undefined}
-                      whileTap={isMyTurn ? { scale: 0.96 } : undefined}
-                      type="button"
-                      disabled={!isMyTurn || pendingWildUid !== null}
-                      onClick={handleDrawOrPass}
-                      className={`pointer-events-auto h-10 px-5 rounded-xl text-xs sm:text-sm font-bold transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white inline-flex items-center gap-1.5 ${
-                        isMyTurn
-                          ? hasStack
-                            ? 'text-white shadow-lg'
-                            : 'text-[#151c27] shadow-lg'
-                          : 'text-[#7f9391] border cursor-default'
-                      }`}
-                      style={
-                        isMyTurn
-                          ? { backgroundColor: hasStack ? '#f43f5e' : activeTheme.accent }
-                          : {
-                              backgroundColor: `${activeTheme.surface}d9`,
-                              borderColor: activeTheme.surfaceBorder,
-                            }
-                      }
-                    >
-                      {hasStack && <AlertTriangle className="w-4 h-4" />}
-                      <span>
-                        {hasStack
-                          ? `Take +${activeView.pendingDrawStack} Cards`
-                          : activeView.drawnUid !== null
-                            ? 'Pass Turn'
-                            : 'Draw a Card'}
-                      </span>
-                    </motion.button>
+                  <div
+                    className={`pointer-events-none absolute inset-x-0 flex flex-col items-center gap-1.5 px-4 ${
+                      hudTop === null ? 'bottom-[152px] sm:bottom-[178px]' : ''
+                    }`}
+                    style={hudTop !== null ? { top: `${hudTop}px` } : undefined}
+                  >
+                    <div className="pointer-events-auto flex items-center justify-center gap-2">
+                      <motion.button
+                        whileHover={isMyTurn ? { scale: 1.04 } : undefined}
+                        whileTap={isMyTurn ? { scale: 0.96 } : undefined}
+                        type="button"
+                        disabled={!isMyTurn || pendingWildUid !== null}
+                        onClick={handleDrawOrPass}
+                        className={`h-9 sm:h-10 px-5 rounded-xl text-xs sm:text-sm font-bold transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white inline-flex items-center gap-1.5 ${
+                          isMyTurn
+                            ? hasStack
+                              ? 'text-white shadow-lg'
+                              : 'text-[#151c27] shadow-lg'
+                            : 'text-[#7f9391] border cursor-default'
+                        }`}
+                        style={
+                          isMyTurn
+                            ? { backgroundColor: hasStack ? '#f43f5e' : activeTheme.accent }
+                            : {
+                                backgroundColor: `${activeTheme.surface}d9`,
+                                borderColor: activeTheme.surfaceBorder,
+                              }
+                        }
+                      >
+                        {hasStack && <AlertTriangle className="w-4 h-4" />}
+                        <span>
+                          {hasStack
+                            ? `Take +${activeView.pendingDrawStack} Cards`
+                            : activeView.drawnUid !== null
+                              ? 'Pass Turn'
+                              : 'Draw a Card'}
+                        </span>
+                      </motion.button>
+
+                      {mode === 'multiplayer' && turnSecondsLeft !== null && (
+                        <div
+                          className={`h-9 sm:h-10 px-3 rounded-xl border text-xs sm:text-sm font-mono-tabular font-extrabold inline-flex items-center gap-1.5 shadow-md backdrop-blur-sm transition-colors ${
+                            isLowTime ? 'animate-pulse text-[#fecdd3]' : isWarnTime ? 'text-[#fde68a]' : 'text-[#e6eeec]'
+                          }`}
+                          style={{
+                            backgroundColor: isLowTime
+                              ? 'rgba(244, 63, 94, 0.28)'
+                              : `${activeTheme.surface}e6`,
+                            borderColor: isLowTime
+                              ? '#f43f5e'
+                              : isWarnTime
+                                ? '#fbbf24'
+                                : activeTheme.surfaceBorder,
+                          }}
+                          title="25-second turn countdown"
+                          aria-label={`${turnSecondsLeft} seconds remaining in turn`}
+                        >
+                          <Clock className="w-3.5 h-3.5 shrink-0" />
+                          <span>{turnSecondsLeft}s</span>
+                        </div>
+                      )}
+                    </div>
 
                     <div
-                      className="pointer-events-auto px-4 py-1.5 rounded-xl border text-xs sm:text-sm font-medium text-[#e6eeec] text-center max-w-md shadow-md backdrop-blur-sm inline-flex items-center gap-2"
+                      className="pointer-events-auto px-3.5 py-1.5 rounded-xl border text-xs sm:text-sm font-medium text-[#e6eeec] text-center max-w-md shadow-md backdrop-blur-sm inline-flex items-center gap-2"
                       style={{
                         backgroundColor: `${activeTheme.surface}e0`,
                         borderColor: hasStack
@@ -2688,7 +3029,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="pointer-events-none absolute right-3 bottom-[262px] sm:bottom-6 sm:right-6 z-10">
+                  <div className="pointer-events-none absolute right-3 bottom-[122px] sm:bottom-6 sm:right-6 z-10">
                     <motion.button
                       whileHover={canPressUno ? { scale: 1.06 } : undefined}
                       whileTap={canPressUno ? { scale: 0.95 } : undefined}
@@ -3238,6 +3579,184 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Multiplayer Players & Kick Modal */}
+      <AnimatePresence>
+        {showPlayersModal && mode === 'multiplayer' && multiView && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-40 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="players-modal-title"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.92, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 10 }}
+              transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+              className="w-full max-w-md rounded-2xl border p-6 shadow-2xl max-h-[88dvh] overflow-y-auto"
+              style={{
+                backgroundColor: activeTheme.surface,
+                borderColor: activeTheme.surfaceBorder,
+              }}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 id="players-modal-title" className="font-display text-xl font-bold text-[#f4f4ed]">
+                    Room Players
+                  </h2>
+                  <p className="text-xs font-mono-tabular text-[#9fb3b0] mt-0.5">
+                    Room {multiView.roomId} ·{' '}
+                    {multiView.seats.filter((s) => s.isCpu || (s.occupied ?? s.connected)).length}/
+                    {multiView.playerCount} seated
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPlayersModal(false)}
+                  className="h-10 w-10 inline-flex items-center justify-center rounded-xl text-[#9fb3b0] hover:text-white hover:bg-white/10 transition-colors focus-visible:outline-2 focus-visible:outline-white"
+                  aria-label="Close players dialog"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-2 mb-5">
+                {(() => {
+                  const activeHostIndex = multiView.hostIndex ?? 0;
+                  const humanCount = multiView.seats.filter(
+                    (s) => !s.isCpu && (s.occupied ?? s.connected)
+                  ).length;
+
+                  return multiView.seats.map((seat) => {
+                    const isSelf = seat.index === multiView.selfIndex;
+                    const isSeatHost = seat.index === activeHostIndex;
+                    const isOccupiedHuman = !seat.isCpu && (seat.occupied ?? seat.connected);
+                    const canHostKick =
+                      multiView.selfIndex === activeHostIndex && !isSeatHost && isOccupiedHuman;
+                    const canVoteKick = !isSelf && isOccupiedHuman && humanCount >= 3;
+                    const isKicking = kickingSeatIndex === seat.index;
+                    const isVoting = votingSeatIndex === seat.index;
+                    const votes = seat.kickVotes ?? 0;
+                    const required = seat.kickVotesRequired ?? 2;
+
+                    return (
+                      <div
+                        key={seat.index}
+                        className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border"
+                        style={{
+                          backgroundColor:
+                            seat.connected || isOccupiedHuman
+                              ? 'rgba(255,255,255,0.04)'
+                              : 'rgba(0,0,0,0.2)',
+                          borderColor: activeTheme.surfaceBorder,
+                        }}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-sm text-[#f4f4ed] truncate">
+                              {seat.name}
+                            </span>
+                            {isSeatHost && (
+                              <span
+                                className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/10"
+                                style={{ color: activeTheme.accent }}
+                              >
+                                Host
+                              </span>
+                            )}
+                            {isSelf && (
+                              <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-[#d6e2e0]">
+                                You
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs font-mono-tabular text-[#9fb3b0] mt-0.5">
+                            {seat.isCpu
+                              ? `CPU · ${seat.cardCount} cards · ${seat.score} wins`
+                              : !isOccupiedHuman
+                                ? 'Open seat'
+                                : seat.eliminated
+                                  ? 'Eliminated (Mercy KO)'
+                                  : `${seat.connected ? 'Connected' : 'Disconnected'} · ${seat.cardCount} cards · ${seat.score} wins`}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {canVoteKick && (
+                            <button
+                              type="button"
+                              disabled={isVoting}
+                              onClick={() => handleVoteKick(seat.index)}
+                              aria-label={`Vote to kick ${seat.name}`}
+                              title={
+                                seat.votedToKickBySelf
+                                  ? `Withdraw kick vote (${votes}/${required})`
+                                  : `Vote to kick ${seat.name} (${votes}/${required} majority)`
+                              }
+                              className={`h-9 inline-flex items-center gap-1.5 px-2.5 rounded-lg border text-xs font-bold disabled:opacity-50 transition-colors focus-visible:outline-2 focus-visible:outline-white ${
+                                seat.votedToKickBySelf
+                                  ? 'bg-[#fb923c]/25 border-[#fb923c]/60 text-[#fed7aa]'
+                                  : 'bg-white/5 hover:bg-white/10 border-white/15 text-[#d6e2e0]'
+                              }`}
+                            >
+                              <ThumbsDown className="w-3.5 h-3.5" />
+                              <span className="font-mono-tabular">
+                                {isVoting ? '...' : `${votes}/${required}`}
+                              </span>
+                            </button>
+                          )}
+
+                          {canHostKick && (
+                            <button
+                              type="button"
+                              disabled={isKicking}
+                              onClick={() => handleKickPlayer(seat.index)}
+                              aria-label={`Kick ${seat.name}`}
+                              className="h-9 inline-flex items-center gap-1.5 px-3 rounded-lg bg-[#ee3f4f]/15 hover:bg-[#ee3f4f]/30 border border-[#ee3f4f]/50 text-xs font-bold text-[#ffb4bc] disabled:opacity-50 transition-colors focus-visible:outline-2 focus-visible:outline-white"
+                            >
+                              <UserX className="w-3.5 h-3.5" />
+                              <span>{isKicking ? 'Kicking...' : 'Kick'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {roomId && roomToken && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPlayersModal(false);
+                      setShowQrModal(true);
+                    }}
+                    className="h-11 px-4 rounded-xl border text-xs sm:text-sm font-semibold text-[#f4f4ed] hover:bg-white/5 inline-flex items-center gap-2 transition-colors"
+                    style={{ borderColor: activeTheme.surfaceBorder }}
+                  >
+                    <QrCode className="w-4 h-4" style={{ color: activeTheme.accent }} />
+                    <span>Invite Link / QR</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowPlayersModal(false)}
+                  className="flex-1 h-11 px-4 rounded-xl text-[#151c27] font-bold text-sm hover:opacity-90 transition-opacity"
+                  style={{ backgroundColor: activeTheme.accent }}
+                >
+                  Done
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* QR Invite Modal */}
       {showQrModal && roomId && roomToken && (
         <QrInviteModal
@@ -3245,15 +3764,19 @@ export default function App() {
           roomId={roomId}
           playerCount={multiView?.playerCount ?? playerCount}
           seats={multiView?.seats ?? []}
-          isHost={multiView ? multiView.selfIndex === 0 : true}
+          selfIndex={multiView?.selfIndex ?? 0}
+          hostIndex={multiView?.hostIndex ?? 0}
+          isHost={multiView ? multiView.selfIndex === (multiView.hostIndex ?? 0) : true}
           isWaiting={multiView ? multiView.turn === 'waiting' : true}
           opponentConnected={Boolean(multiView?.opponentConnected)}
           opponentName={multiView?.opponentName || 'Friend'}
           theme={activeTheme}
-          onStartWithCpus={() => {
-            sendWsAction({ type: 'start_now' });
-            setShowQrModal(false);
-          }}
+          kickingSeatIndex={kickingSeatIndex}
+          votingSeatIndex={votingSeatIndex}
+          onKickPlayer={handleKickPlayer}
+          onVoteKick={handleVoteKick}
+          onStartMatch={() => handleStartMultiplayerMatch(false)}
+          onStartWithCpus={() => handleStartMultiplayerMatch(true)}
           onClose={() => setShowQrModal(false)}
         />
       )}
