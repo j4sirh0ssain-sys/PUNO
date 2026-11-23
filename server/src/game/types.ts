@@ -5,7 +5,20 @@ export type CardColor = SuitColor | 'Wild';
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 10;
 
-export type DifficultyLevel = 'chill' | 'normal' | 'hard' | 'no_mercy';
+export type DifficultyLevel = 'chill' | 'normal' | 'hard' | 'no_mercy' | 'bomboclatt';
+
+export const BOMBOCLATT_CARD_VALUES = [
+  'Rizzler Arvin',
+  'Rafath Kauwa',
+  'Gooner Surjo',
+  'Toothpick Alif',
+] as const;
+
+export const RIZZ_PICKUP_LINES = [
+  'Did you get hurt bcuz you just fell from heaven',
+  'Are you from tennessee bcuz youre the only 10 I see',
+  'Are a keyboard bcuz youre my type',
+] as const;
 
 export const POWER_CARD_VALUES = new Set([
   'Skip',
@@ -18,6 +31,7 @@ export const POWER_CARD_VALUES = new Set([
   '+6',
   '+10',
   'Roulette',
+  ...BOMBOCLATT_CARD_VALUES,
 ]);
 
 export const DRAW_CARD_AMOUNTS: Record<string, number> = {
@@ -28,6 +42,7 @@ export const DRAW_CARD_AMOUNTS: Record<string, number> = {
 };
 
 export const MERCY_HAND_LIMIT = 25;
+export const BOMBOCLATT_HAND_LIMIT = 50;
 
 export interface Card {
   color: CardColor;
@@ -54,6 +69,20 @@ export interface SeatInfo {
   kickVotes?: number;
   kickVotesRequired?: number;
   votedToKickBySelf?: boolean;
+}
+
+export interface PendingRizzPrompt {
+  promptId: string;
+  fromIndex: number;
+  fromName: string;
+  line: string;
+}
+
+export interface PeekTargetInfo {
+  targetIndex: number;
+  targetName: string;
+  cards: Card[];
+  expiresAt: number;
 }
 
 export type EffectEvent =
@@ -113,6 +142,38 @@ export type EffectEvent =
       seatIndex?: number;
     }
   | {
+      kind: 'rizz_line';
+      fromName: string;
+      targetName: string;
+      line: string;
+      accepted?: boolean;
+      seatIndex?: number;
+      targetIndex?: number;
+    }
+  | {
+      kind: 'crow_feathers';
+      whoName: string;
+      targetName: string;
+      seatIndex?: number;
+      targetIndex?: number;
+    }
+  | {
+      kind: 'surjo_ko';
+      whoName: string;
+      targetName: string;
+      isSelfLoser: boolean;
+      seatIndex?: number;
+      targetIndex?: number;
+    }
+  | {
+      kind: 'steal_power';
+      thiefName: string;
+      victimName: string;
+      stolenCard?: Card;
+      thiefIndex?: number;
+      victimIndex?: number;
+    }
+  | {
       kind: 'win';
       winnerRole: PlayerRole;
       winnerIndex?: number;
@@ -163,6 +224,8 @@ export interface ClientGameView {
   turnDeadlineAt?: number | null;
   turnDurationMs?: number;
   serverNow?: number;
+  pendingRizzPrompt?: PendingRizzPrompt | null;
+  peekTarget?: PeekTargetInfo | null;
 }
 
 export interface JoinRoomPayload {
@@ -175,6 +238,11 @@ export interface JoinRoomPayload {
 export interface PlayCardPayload {
   uid: number;
   chosenColor?: SuitColor;
+}
+
+export interface RizzResponsePayload {
+  promptId: string;
+  accept: boolean;
 }
 
 export interface RestartPayload {

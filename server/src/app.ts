@@ -12,13 +12,16 @@ import {
   drawColorRoulette,
   drawOneFromDeck,
   getDrawAmount,
+  getHandLimit,
   getNextAliveSeatIndex,
   isDifficultyLevel,
+  isNoMercyRuleset,
   isSuitColor,
   shouldCpuCallUno,
 } from './game/engine.ts';
 import {
-  MERCY_HAND_LIMIT,
+  POWER_CARD_VALUES,
+  RIZZ_PICKUP_LINES,
   type Card,
   type ClientGameView,
   type DifficultyLevel,
@@ -29,6 +32,7 @@ import {
   type PlayerRole,
   type RenamePayload,
   type RestartPayload,
+  type RizzResponsePayload,
   type SeatInfo,
   type ServerStatePayload,
   type StartGamePayload,
@@ -39,6 +43,8 @@ import {
 const ROOM_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const DEFAULT_GITHUB_PAGES_ORIGIN = 'https://j4sirh0ssain-sys.github.io';
 const DEFAULT_TURN_TIMEOUT_MS = 25_000;
+const RIZZ_PROMPT_TIMEOUT_MS = 20_000;
+const RAFATH_PEEK_DURATION_MS = 7_500;
 
 interface ServerSeat {
   index: number;
@@ -51,6 +57,24 @@ interface ServerSeat {
   unoArmed: boolean;
   eliminated: boolean;
   score: number;
+}
+
+interface PendingRizzState {
+  promptId: string;
+  fromIndex: number;
+  targetIndex: number;
+  line: string;
+  nextTurnIndex: number;
+  chosenColor: SuitColor;
+  timer: NodeJS.Timeout | null;
+}
+
+interface PeekState {
+  viewerIndex: number;
+  targetIndex: number;
+  targetName: string;
+  cards: Card[];
+  expiresAt: number;
 }
 
 interface RoomState {
@@ -78,6 +102,9 @@ interface RoomState {
   cpuTimer: NodeJS.Timeout | null;
   turnTimer: NodeJS.Timeout | null;
   turnDeadlineAt: number | null;
+  pendingRizz: PendingRizzState | null;
+  peekState: PeekState | null;
+  goonerSurjoUsed: boolean;
   kickedClientIds: Set<string>;
   kickVotes: Map<number, Set<string>>;
   createdAt: number;
@@ -293,6 +320,9 @@ export function attachMultiplayerServer(
       cpuTimer: null,
       turnTimer: null,
       turnDeadlineAt: null,
+      pendingRizz: null,
+      peekState: null,
+      goonerSurjoUsed: false,
       kickedClientIds: new Set<string>(),
       kickVotes: new Map<number, Set<string>>(),
       createdAt: Date.now(),
@@ -414,6 +444,26 @@ export function attachMultiplayerServer(
       turnDeadlineAt: room.turnDeadlineAt,
       turnDurationMs: turnTimeoutMs,
       serverNow: nowMs,
+      pendingRizzPrompt:
+        room.pendingRizz && room.pendingRizz.targetIndex === seatIndex
+          ? {
+              promptId: room.pendingRizz.promptId,
+              fromIndex: room.pendingRizz.fromIndex,
+              fromName: room.seats[room.pendingRizz.fromIndex]?.name ?? 'Player',
+              line: room.pendingRizz.line,
+            }
+          : null,
+      peekTarget:
+        room.peekState &&
+        room.peekState.viewerIndex === seatIndex &&
+        nowMs < room.peekState.expiresAt
+          ? {
+              targetIndex: room.peekState.targetIndex,
+              targetName: room.peekState.targetName,
+              cards: room.peekState.cards,
+              expiresAt: room.peekState.expiresAt,
+            }
+          : null,
     };
   }
 
@@ -452,9 +502,42 @@ export function attachMultiplayerServer(
     room.turnDeadlineAt = null;
   }
 
+  function clearPendingRizz(room: RoomState): void {
+    if (room.pendingRizz?.timer) {
+      clearTimeout(room.pendingRizz.timer);
+    }
+    room.pendingRizz = null;
+  }
+
   function recycleHandToDeck(room: RoomState, hand: Card[]): void {
     if (hand.length === 0) return;
-    room.deck.unshift(...hand.splice(0, hand.length));
+    const filtered = hand.splice(0, hand.length).filter(
+      (c) => !(room.goonerSurjoUsed && c.value === 'Gooner Surjo')
+    );
+    if (filtered.length > 0) {
+      room.deck.unshift(...filtered);
+    }
+  }
+
+  function drawWithUniqueSurjoGuard(
+    room: RoomState,
+    targetHand: Card[]
+  ): { card: Card | null; reshuffled: boolean } {
+    const res = drawOneFromDeck(room.deck, room.discard, targetHand);
+    if (res.reshuffled && room.goonerSurjoUsed) {
+      for (let i = room.deck.length - 1; i >= 0; i--) {
+        if (room.deck[i].value === 'Gooner Surjo') {
+          room.deck.splice(i, 1);
+        }
+      }
+      if (res.card && res.card.value === 'Gooner Surjo') {
+        const idx = targetHand.findIndex((c) => c.uid === res.card!.uid);
+        if (idx !== -1) targetHand.splice(idx, 1);
+        const retry = drawOneFromDeck(room.deck, room.discard, targetHand);
+        return { card: retry.card, reshuffled: res.reshuffled || retry.reshuffled };
+      }
+    }
+    return res;
   }
 
   function handleTurnTimeout(
@@ -486,7 +569,7 @@ export function attachMultiplayerServer(
         { kind: 'banner', text: 'TIME UP!', color: '#fb923c', size: 0.65, dur: 0.9 },
       ];
       for (let i = 0; i < stackCount; i++) {
-        const res = drawOneFromDeck(room.deck, room.discard, timedOutSeat.hand);
+        const res = drawWithUniqueSurjoGuard(room, timedOutSeat.hand);
         if (res.reshuffled) effs.push({ kind: 'reshuffle' });
       }
       effs.push({ kind: 'seat_draw', seatIndex: timedOutSeat.index, count: stackCount });
@@ -556,6 +639,8 @@ export function attachMultiplayerServer(
   ): void {
     clearCpuTimer(room);
     clearTurnTimer(room);
+    clearPendingRizz(room);
+    room.peekState = null;
     room.pendingDrawStack = 0;
     room.pendingDrawMin = 0;
     room.winner = winnerSeat.index === 0 ? 'host' : 'guest';
@@ -590,7 +675,8 @@ export function attachMultiplayerServer(
     loserSeat: ServerSeat,
     baseEffects: EffectEvent[]
   ): boolean {
-    if (room.difficulty !== 'no_mercy' || loserSeat.hand.length < MERCY_HAND_LIMIT) {
+    const limit = getHandLimit(room.difficulty);
+    if (!limit || loserSeat.hand.length < limit) {
       return false;
     }
     loserSeat.eliminated = true;
@@ -601,7 +687,7 @@ export function attachMultiplayerServer(
       finishRoundWithWinner(
         room,
         survivor,
-        `MERCY KO! ${loserSeat.name} hit 25+ cards — ${survivor.name} wins!`,
+        `KNOCKOUT! ${loserSeat.name} hit ${limit}+ cards — ${survivor.name} wins!`,
         (seatIdx) => [
           ...baseEffects,
           {
@@ -620,7 +706,7 @@ export function attachMultiplayerServer(
     }
     room.turn = room.turnIndex === 0 ? 'host' : 'guest';
     const nextSeat = room.seats[room.turnIndex];
-    room.message = `MERCY KO! ${loserSeat.name} eliminated! ${nextSeat.name}'s turn.`;
+    room.message = `KNOCKOUT! ${loserSeat.name} hit ${limit}+ cards! ${nextSeat.name}'s turn.`;
     scheduleCpuIfNeeded(room);
     broadcastRoom(room, (seatIdx) => [
       ...baseEffects,
@@ -632,6 +718,73 @@ export function attachMultiplayerServer(
       },
     ]);
     return true;
+  }
+
+  function resolveRizzPrompt(
+    room: RoomState,
+    promptId: string,
+    accept: boolean
+  ): void {
+    const pending = room.pendingRizz;
+    if (!pending || pending.promptId !== promptId) return;
+    if (pending.timer) {
+      clearTimeout(pending.timer);
+      pending.timer = null;
+    }
+    room.pendingRizz = null;
+
+    const fromSeat = room.seats[pending.fromIndex];
+    const targetSeat = room.seats[pending.targetIndex];
+    const effects: EffectEvent[] = [];
+
+    if (accept && fromSeat && targetSeat && !targetSeat.eliminated && targetSeat.hand.length > 0) {
+      const pickIdx = Math.floor(Math.random() * targetSeat.hand.length);
+      const [gifted] = targetSeat.hand.splice(pickIdx, 1);
+      fromSeat.hand.push(gifted);
+      effects.push({
+        kind: 'rizz_line',
+        fromName: fromSeat.name,
+        targetName: targetSeat.name,
+        line: pending.line,
+        accepted: true,
+        seatIndex: fromSeat.index,
+        targetIndex: targetSeat.index,
+      });
+
+      if (targetSeat.hand.length === 0) {
+        finishRoundWithWinner(
+          room,
+          targetSeat,
+          `${targetSeat.name} gave away their last card to Rizzler Arvin and wins!`,
+          () => effects
+        );
+        return;
+      }
+      if (handleMercyKnockout(room, fromSeat, effects)) return;
+      room.message = `${targetSeat.name} accepted Rizzler Arvin's line 👍 (+1 card to ${fromSeat.name})!`;
+    } else {
+      effects.push({
+        kind: 'rizz_line',
+        fromName: fromSeat?.name ?? 'Player',
+        targetName: targetSeat?.name ?? 'Opponent',
+        line: pending.line,
+        accepted: false,
+        seatIndex: pending.fromIndex,
+        targetIndex: pending.targetIndex,
+      });
+      room.message = `${targetSeat?.name ?? 'Opponent'} curved Rizzler Arvin 👎 — match continues!`;
+    }
+
+    const nextIdx =
+      room.seats[pending.nextTurnIndex] && !room.seats[pending.nextTurnIndex].eliminated
+        ? pending.nextTurnIndex
+        : advanceTurn(room, 1);
+    room.turnIndex = nextIdx;
+    room.turn = nextIdx === 0 ? 'host' : 'guest';
+    const nextSeat = room.seats[nextIdx];
+    room.message = `${room.message} ${nextSeat ? `${nextSeat.name}'s turn.` : ''}`.trim();
+    scheduleCpuIfNeeded(room);
+    broadcastRoom(room, () => effects);
   }
 
   function commitSeatPlay(
@@ -689,7 +842,7 @@ export function attachMultiplayerServer(
         penalizedUno = true;
         unoTrigger = 'penalty';
         for (let i = 0; i < 2; i++) {
-          const res = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
+          const res = drawWithUniqueSurjoGuard(room, activeSeat.hand);
           if (res.reshuffled) sharedEffects.push({ kind: 'reshuffle' });
         }
         sharedEffects.push({ kind: 'seat_draw', seatIndex: activeSeat.index, count: 2 });
@@ -716,11 +869,234 @@ export function attachMultiplayerServer(
       return list;
     };
 
-    const aliveCount = getAliveSeats(room).length;
+    const aliveSeats = getAliveSeats(room);
+    const aliveCount = aliveSeats.length;
+    const aliveOpponents = aliveSeats.filter((s) => s.index !== activeSeat.index);
     const drawAmount = getDrawAmount(card);
 
-    if (drawAmount > 0) {
-      if (room.difficulty === 'no_mercy') {
+    if (card.value === 'Rizzler Arvin') {
+      const targetSeat =
+        aliveOpponents.length > 0
+          ? aliveOpponents[Math.floor(Math.random() * aliveOpponents.length)]
+          : null;
+      const line = RIZZ_PICKUP_LINES[Math.floor(Math.random() * RIZZ_PICKUP_LINES.length)];
+      if (!targetSeat) {
+        room.turnIndex = advanceTurn(room, 1);
+        room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+        room.message = `${activeSeat.name} dropped Rizzler Arvin (${chosenColor})!`;
+      } else if (targetSeat.isCpu) {
+        const accepted = targetSeat.hand.length > 0 && Math.random() < 0.45;
+        if (accepted) {
+          const pickIdx = Math.floor(Math.random() * targetSeat.hand.length);
+          const [gifted] = targetSeat.hand.splice(pickIdx, 1);
+          activeSeat.hand.push(gifted);
+          sharedEffects.push({
+            kind: 'rizz_line',
+            fromName: activeSeat.name,
+            targetName: targetSeat.name,
+            line,
+            accepted: true,
+            seatIndex: activeSeat.index,
+            targetIndex: targetSeat.index,
+          });
+          if (targetSeat.hand.length === 0) {
+            finishRoundWithWinner(
+              room,
+              targetSeat,
+              `${targetSeat.name} accepted Rizzler Arvin 👍 and gave away its last card!`,
+              perSeatEffects
+            );
+            return;
+          }
+          if (handleMercyKnockout(room, activeSeat, perSeatEffects(activeSeat.index))) return;
+        } else {
+          sharedEffects.push({
+            kind: 'rizz_line',
+            fromName: activeSeat.name,
+            targetName: targetSeat.name,
+            line,
+            accepted: false,
+            seatIndex: activeSeat.index,
+            targetIndex: targetSeat.index,
+          });
+        }
+        room.turnIndex = advanceTurn(room, 1);
+        room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+        const nextSeat = room.seats[room.turnIndex];
+        room.message = accepted
+          ? `${activeSeat.name} rizzed ${targetSeat.name} 👍 (+1 card)! ${nextSeat.name}'s turn.`
+          : `${targetSeat.name} curved ${activeSeat.name}'s rizz 👎! ${nextSeat.name}'s turn.`;
+      } else {
+        clearCpuTimer(room);
+        clearTurnTimer(room);
+        clearPendingRizz(room);
+        const promptId = crypto.randomUUID();
+        const nextTurnIndex = advanceTurn(room, 1);
+        const timer = setTimeout(() => {
+          resolveRizzPrompt(room, promptId, false);
+        }, RIZZ_PROMPT_TIMEOUT_MS);
+        room.pendingRizz = {
+          promptId,
+          fromIndex: activeSeat.index,
+          targetIndex: targetSeat.index,
+          line,
+          nextTurnIndex,
+          chosenColor,
+          timer,
+        };
+        room.turn = 'busy';
+        room.message = `${activeSeat.name} sent a Rizzler Arvin pickup line to ${targetSeat.name}...`;
+        sharedEffects.push({
+          kind: 'rizz_line',
+          fromName: activeSeat.name,
+          targetName: targetSeat.name,
+          line,
+          seatIndex: activeSeat.index,
+          targetIndex: targetSeat.index,
+        });
+        broadcastRoom(room, perSeatEffects);
+        return;
+      }
+    } else if (card.value === 'Rafath Kauwa') {
+      const targetSeat =
+        aliveOpponents.length > 0
+          ? aliveOpponents[Math.floor(Math.random() * aliveOpponents.length)]
+          : null;
+      if (targetSeat) {
+        room.peekState = {
+          viewerIndex: activeSeat.index,
+          targetIndex: targetSeat.index,
+          targetName: targetSeat.name,
+          cards: [...targetSeat.hand],
+          expiresAt: Date.now() + RAFATH_PEEK_DURATION_MS,
+        };
+        sharedEffects.push({
+          kind: 'crow_feathers',
+          whoName: activeSeat.name,
+          targetName: targetSeat.name,
+          seatIndex: activeSeat.index,
+          targetIndex: targetSeat.index,
+        });
+      }
+      room.turnIndex = advanceTurn(room, 1);
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      const nextSeat = room.seats[room.turnIndex];
+      room.message = targetSeat
+        ? `KAAAW! ${activeSeat.name} used Rafath Kauwa to spy on ${targetSeat.name}'s cards (7.5s)! ${nextSeat.name}'s turn.`
+        : `KAAAW! ${activeSeat.name} summoned Rafath Kauwa! ${nextSeat.name}'s turn.`;
+    } else if (card.value === 'Gooner Surjo') {
+      if (room.goonerSurjoUsed) {
+        room.turnIndex = advanceTurn(room, 1);
+        room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+        const nextSeat = room.seats[room.turnIndex];
+        room.message = `Gooner Surjo was already used this game! ${nextSeat.name}'s turn.`;
+      } else {
+        room.goonerSurjoUsed = true;
+        const targetSeat =
+          aliveOpponents.length > 0
+            ? aliveOpponents[Math.floor(Math.random() * aliveOpponents.length)]
+            : null;
+        if (targetSeat) {
+          targetSeat.eliminated = true;
+          recycleHandToDeck(room, targetSeat.hand);
+          const remaining = getAliveSeats(room);
+          if (remaining.length <= 1) {
+            const survivor = remaining[0] ?? activeSeat;
+            finishRoundWithWinner(
+              room,
+              survivor,
+              `GOONER SURJO! ${targetSeat.name} was eliminated — ${survivor.name} wins!`,
+              (seatIdx) => [
+                ...perSeatEffects(seatIdx),
+                {
+                  kind: 'surjo_ko',
+                  whoName: activeSeat.name,
+                  targetName: targetSeat.name,
+                  isSelfLoser: targetSeat.index === seatIdx,
+                  seatIndex: activeSeat.index,
+                  targetIndex: targetSeat.index,
+                },
+              ]
+            );
+            return;
+          }
+          room.turnIndex = advanceTurn(room, 1);
+          room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+          const nextSeat = room.seats[room.turnIndex];
+          room.message = `GOONER SURJO! ${targetSeat.name} eliminated! ${nextSeat.name}'s turn.`;
+          scheduleCpuIfNeeded(room);
+          broadcastRoom(room, (seatIdx) => [
+            ...perSeatEffects(seatIdx),
+            {
+              kind: 'surjo_ko',
+              whoName: activeSeat.name,
+              targetName: targetSeat.name,
+              isSelfLoser: targetSeat.index === seatIdx,
+              seatIndex: activeSeat.index,
+              targetIndex: targetSeat.index,
+            },
+          ]);
+          return;
+        }
+        room.turnIndex = advanceTurn(room, 1);
+        room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+        room.message = `Gooner Surjo played!`;
+      }
+    } else if (card.value === 'Toothpick Alif') {
+      const candidates = aliveOpponents.filter((opp) =>
+        opp.hand.some((c) => POWER_CARD_VALUES.has(c.value))
+      );
+      if (candidates.length > 0) {
+        const victimSeat = candidates[Math.floor(Math.random() * candidates.length)];
+        const powerIndices = victimSeat.hand
+          .map((c, i) => (POWER_CARD_VALUES.has(c.value) ? i : -1))
+          .filter((i) => i >= 0);
+        const stealIdx = powerIndices[Math.floor(Math.random() * powerIndices.length)];
+        const [stolenCard] = victimSeat.hand.splice(stealIdx, 1);
+        activeSeat.hand.push(stolenCard);
+
+        if (victimSeat.hand.length === 0) {
+          const rep = drawWithUniqueSurjoGuard(room, victimSeat.hand);
+          if (rep.reshuffled) sharedEffects.push({ kind: 'reshuffle' });
+          if (rep.card) sharedEffects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: 1 });
+        }
+
+        if (handleMercyKnockout(room, activeSeat, perSeatEffects(activeSeat.index))) return;
+
+        room.turnIndex = advanceTurn(room, 1);
+        room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+        const nextSeat = room.seats[room.turnIndex];
+        room.message = `TOOTHPICK ALIF! ${activeSeat.name} stole a power card from ${victimSeat.name}! ${nextSeat.name}'s turn.`;
+        scheduleCpuIfNeeded(room);
+        broadcastRoom(room, (seatIdx) => [
+          ...perSeatEffects(seatIdx),
+          {
+            kind: 'steal_power',
+            thiefName: activeSeat.name,
+            victimName: victimSeat.name,
+            stolenCard:
+              seatIdx === activeSeat.index || seatIdx === victimSeat.index
+                ? stolenCard
+                : undefined,
+            thiefIndex: activeSeat.index,
+            victimIndex: victimSeat.index,
+          },
+        ]);
+        return;
+      }
+      room.turnIndex = advanceTurn(room, 1);
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      const nextSeat = room.seats[room.turnIndex];
+      sharedEffects.push({
+        kind: 'banner',
+        text: 'NO POWER CARDS TO STEAL!',
+        color: '#eab308',
+        size: 0.6,
+        dur: 1.0,
+      });
+      room.message = `Toothpick Alif found no power cards to steal! ${nextSeat.name}'s turn.`;
+    } else if (drawAmount > 0) {
+      if (isNoMercyRuleset(room.difficulty)) {
         room.pendingDrawStack += drawAmount;
         room.pendingDrawMin = drawAmount;
         room.turnIndex = advanceTurn(room, 1);
@@ -734,7 +1110,7 @@ export function attachMultiplayerServer(
         const victimSeat = room.seats[victimIndex];
         let reshuffledAny = false;
         for (let i = 0; i < drawAmount; i++) {
-          const res = drawOneFromDeck(room.deck, room.discard, victimSeat.hand);
+          const res = drawWithUniqueSurjoGuard(room, victimSeat.hand);
           if (res.reshuffled) reshuffledAny = true;
         }
         if (reshuffledAny) sharedEffects.push({ kind: 'reshuffle' });
@@ -762,10 +1138,8 @@ export function attachMultiplayerServer(
         sharedEffects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: rRes.drawnCount });
       }
 
-      if (room.difficulty === 'no_mercy' && victimSeat.hand.length >= MERCY_HAND_LIMIT) {
-        if (handleMercyKnockout(room, victimSeat, perSeatEffects(victimSeat.index))) {
-          return;
-        }
+      if (handleMercyKnockout(room, victimSeat, perSeatEffects(victimSeat.index))) {
+        return;
       }
 
       room.turnIndex = advanceTurn(room, 2);
@@ -903,6 +1277,9 @@ export function attachMultiplayerServer(
   ): void {
     clearCpuTimer(room);
     clearTurnTimer(room);
+    clearPendingRizz(room);
+    room.peekState = null;
+    room.goonerSurjoUsed = false;
     if (nextDifficulty) {
       room.difficulty = nextDifficulty;
     }
@@ -953,9 +1330,11 @@ export function attachMultiplayerServer(
       room.turn = room.turnIndex === 0 ? 'host' : 'guest';
       room.message = jasirBoost
         ? `j4s1r POWER-UP: 7 power cards dealt! ${hostSeat.name}'s turn.`
-        : room.difficulty === 'no_mercy'
-          ? `NO MERCY active — ${hostSeat.name}'s turn.`
-          : `${hostSeat.name}'s turn — match the color or value.`;
+        : room.difficulty === 'bomboclatt'
+          ? `BOMBOCLATT MODE (50-card KO) — ${hostSeat.name}'s turn.`
+          : room.difficulty === 'no_mercy'
+            ? `NO MERCY active — ${hostSeat.name}'s turn.`
+            : `${hostSeat.name}'s turn — match the color or value.`;
 
       scheduleCpuIfNeeded(room);
       broadcastRoom(room, (seatIdx) => [
@@ -1090,6 +1469,14 @@ export function attachMultiplayerServer(
       return;
     }
 
+    if (
+      room.pendingRizz &&
+      (room.pendingRizz.targetIndex === targetSeat.index ||
+        room.pendingRizz.fromIndex === targetSeat.index)
+    ) {
+      clearPendingRizz(room);
+    }
+
     if (room.turnIndex === targetSeat.index) {
       room.drawnUid = null;
       room.turnIndex = advanceTurn(room, 1);
@@ -1118,6 +1505,7 @@ export function attachMultiplayerServer(
       if (room.lastActivityAt < cutoff) {
         clearCpuTimer(room);
         clearTurnTimer(room);
+        clearPendingRizz(room);
         rooms.delete(id);
       }
     }
@@ -1666,10 +2054,27 @@ export function attachMultiplayerServer(
       startFreshRound(ctx.room, nextDiff, false, keepWaiting);
     });
 
+    socket.on('rizz_response', (payload: RizzResponsePayload) => {
+      const ctx = getBoundContext();
+      if (!ctx) return;
+      const { room, activeSeat } = ctx;
+      if (!room.pendingRizz) return;
+      if (room.pendingRizz.targetIndex !== activeSeat.index) {
+        sendError(socket, 'This Rizzler Arvin prompt is for another player.');
+        return;
+      }
+      if (!payload?.promptId || payload.promptId !== room.pendingRizz.promptId) return;
+      resolveRizzPrompt(room, payload.promptId, Boolean(payload.accept));
+    });
+
     socket.on('call_uno', () => {
       const ctx = getBoundContext();
       if (!ctx) return;
       const { room, activeSeat } = ctx;
+      if (room.pendingRizz) {
+        sendError(socket, 'Waiting for Rizzler Arvin response.');
+        return;
+      }
       if (room.winnerIndex !== null || room.turn === 'waiting' || room.turn === 'over') return;
       if (room.turnIndex !== activeSeat.index || activeSeat.eliminated) {
         sendError(socket, 'Wait for your turn.');
@@ -1692,6 +2097,10 @@ export function attachMultiplayerServer(
       const ctx = getBoundContext();
       if (!ctx) return;
       const { room, activeSeat } = ctx;
+      if (room.pendingRizz) {
+        sendError(socket, 'Waiting for Rizzler Arvin response.');
+        return;
+      }
       if (room.winnerIndex !== null || room.turn === 'waiting' || room.turn === 'over') return;
       if (room.turnIndex !== activeSeat.index || activeSeat.eliminated) {
         sendError(socket, 'Wait for your turn.');
@@ -1704,7 +2113,7 @@ export function attachMultiplayerServer(
         const stackCount = room.pendingDrawStack;
         const effs: EffectEvent[] = [];
         for (let i = 0; i < stackCount; i++) {
-          const res = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
+          const res = drawWithUniqueSurjoGuard(room, activeSeat.hand);
           if (res.reshuffled) effs.push({ kind: 'reshuffle' });
         }
         effs.push({ kind: 'seat_draw', seatIndex: activeSeat.index, count: stackCount });
@@ -1728,7 +2137,7 @@ export function attachMultiplayerServer(
         return;
       }
 
-      const { card, reshuffled } = drawOneFromDeck(room.deck, room.discard, activeSeat.hand);
+      const { card, reshuffled } = drawWithUniqueSurjoGuard(room, activeSeat.hand);
       const effects: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
       if (card) {
         effects.push({ kind: 'seat_draw', seatIndex: activeSeat.index, count: 1 });
@@ -1760,6 +2169,10 @@ export function attachMultiplayerServer(
       const ctx = getBoundContext();
       if (!ctx) return;
       const { room, activeSeat } = ctx;
+      if (room.pendingRizz) {
+        sendError(socket, 'Waiting for Rizzler Arvin response.');
+        return;
+      }
       if (room.winnerIndex !== null || room.turn === 'waiting' || room.turn === 'over') return;
       if (room.turnIndex !== activeSeat.index || activeSeat.eliminated) {
         sendError(socket, 'Wait for your turn.');
@@ -1781,6 +2194,10 @@ export function attachMultiplayerServer(
       const ctx = getBoundContext();
       if (!ctx) return;
       const { room, activeSeat } = ctx;
+      if (room.pendingRizz) {
+        sendError(socket, 'Waiting for Rizzler Arvin response.');
+        return;
+      }
       if (room.winnerIndex !== null || room.turn === 'waiting' || room.turn === 'over') return;
       if (room.turnIndex !== activeSeat.index || activeSeat.eliminated) {
         sendError(socket, 'Wait for your turn.');

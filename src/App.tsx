@@ -4,7 +4,9 @@ import {
   AlertTriangle,
   Clock,
   Crown,
+  Eye,
   Flame,
+  Heart,
   Megaphone,
   Palette,
   Play,
@@ -14,6 +16,7 @@ import {
   Sparkles,
   Star,
   ThumbsDown,
+  ThumbsUp,
   Trophy,
   User,
   UserX,
@@ -22,6 +25,7 @@ import {
   VolumeX,
   Wifi,
   X,
+  Zap,
 } from 'lucide-react';
 import { io, type Socket } from 'socket.io-client';
 import { HomeBackdrop, PunoLogo } from './components/HomeVisuals.tsx';
@@ -37,24 +41,29 @@ import {
   drawColorRoulette,
   drawOneFromDeck,
   getDrawAmount,
+  getHandLimit,
   getNextAliveSeatIndex,
   isDifficultyLevel,
+  isNoMercyRuleset,
   shouldCpuCallUno,
 } from './game/engine.ts';
 import { soundFx } from './game/sound.ts';
 import { TABLE_THEMES, THEME_LIST, type TableTheme, type TableThemeId } from './game/themes.ts';
 import {
+  BOMBOCLATT_CARD_VALUES,
   COLORS,
   DIFFICULTY_LIST,
   MAX_PLAYERS,
-  MERCY_HAND_LIMIT,
   MIN_PLAYERS,
+  POWER_CARD_VALUES,
+  RIZZ_PICKUP_LINES,
   type Card,
   type ClientGameView,
   type ClientWsAction,
   type DifficultyLevel,
   type EffectEvent,
   type GameMode,
+  type PeekTargetInfo,
   type PlayerRole,
   type SeatInfo,
   type SuitColor,
@@ -73,6 +82,14 @@ interface SoloSeat {
   score: number;
 }
 
+interface SoloPendingRizz {
+  promptId: string;
+  fromIndex: number;
+  targetIndex: number;
+  line: string;
+  nextTurnIndex: number;
+}
+
 interface SoloInternalState {
   difficulty: DifficultyLevel;
   playerCount: number;
@@ -86,6 +103,9 @@ interface SoloInternalState {
   drawnUid: number | null;
   pendingDrawStack: number;
   pendingDrawMin: number;
+  goonerSurjoUsed: boolean;
+  pendingRizz: SoloPendingRizz | null;
+  peekTarget: PeekTargetInfo | null;
   winner: PlayerRole | null;
   winnerIndex: number | null;
   winnerName: string | null;
@@ -197,16 +217,26 @@ function ShowcaseCard({
   zIndex,
   floatDelay,
 }: ShowcaseCardProps) {
-  const suitColor = theme.suitHex[suit];
+  const isBomboclattBadge = label === 'RIZZ' || label === 'SURJO' || label === 'KAUWA';
+  const suitColor =
+    label === 'RIZZ'
+      ? '#e11d48'
+      : label === 'SURJO'
+        ? '#0284c7'
+        : label === 'KAUWA'
+          ? '#1e293b'
+          : theme.suitHex[suit];
   const design = theme.cardDesign;
-  const isDarkFace = design === 'obsidian' || design === 'sunburst';
-  const isWild = suit === 'Wild';
+  const isDarkFace = design === 'obsidian' || design === 'sunburst' || label === 'KAUWA';
+  const isWild = suit === 'Wild' && !isBomboclattBadge;
   const cornerTextColor = isDarkFace
     ? isWild
       ? theme.accent
-      : suitColor
+      : label === 'KAUWA'
+        ? '#f8fafc'
+        : suitColor
     : '#ffffff';
-  const centerTextColor = isWild ? '#ffffff' : suitColor;
+  const centerTextColor = isWild || isBomboclattBadge ? '#ffffff' : suitColor;
   const uid = `sc-${theme.id}-${suit}-${label.replace(/[^a-z0-9]/gi, '')}`;
 
   return (
@@ -255,11 +285,13 @@ function ShowcaseCard({
         className="w-full h-full rounded-lg flex items-center justify-center relative overflow-hidden"
         style={{
           backgroundColor:
-            design === 'obsidian'
-              ? '#0d131d'
-              : design === 'sunburst'
-                ? '#110f0a'
-                : suitColor,
+            isBomboclattBadge
+              ? suitColor
+              : design === 'obsidian'
+                ? '#0d131d'
+                : design === 'sunburst'
+                  ? '#110f0a'
+                  : suitColor,
           border:
             design === 'comic'
               ? '2px solid #141414'
@@ -456,6 +488,9 @@ export default function App() {
   const [votingSeatIndex, setVotingSeatIndex] = useState<number | null>(null);
   const [startingMatch, setStartingMatch] = useState(false);
   const [turnSecondsLeft, setTurnSecondsLeft] = useState<number | null>(null);
+  const [peekSecondsLeft, setPeekSecondsLeft] = useState<number>(0);
+  const [dismissedPeekKey, setDismissedPeekKey] = useState<string | null>(null);
+  const [rizzBusyPromptId, setRizzBusyPromptId] = useState<string | null>(null);
   const clockOffsetRef = useRef<number>(0);
   const [roomBusy, setRoomBusy] = useState(false);
   const [networkError, setNetworkError] = useState<string | null>(null);
@@ -478,12 +513,14 @@ export default function App() {
   const modeRef = useRef<GameMode>(mode);
   const roomIdRef = useRef<string | null>(roomId);
   const roomTokenRef = useRef<string | null>(roomToken);
+  const themeIdRef = useRef<TableThemeId>(themeId);
   const prevWaitingRef = useRef(true);
   const [pointerActive, setPointerActive] = useState(false);
 
   modeRef.current = mode;
   roomIdRef.current = roomId;
   roomTokenRef.current = roomToken;
+  themeIdRef.current = themeId;
 
   const activeView = mode === 'solo' ? soloView : multiView;
 
@@ -563,9 +600,24 @@ export default function App() {
         if (['+6', '+10', 'Roulette', 'Dump', 'Skip All'].includes(eff.card.value)) {
           soundFx.playMegaPower();
         } else {
-          const isPower = ['Skip', 'Reverse', '+2', '+4', 'Wild'].includes(eff.card.value);
+          const isPower = [
+            'Skip',
+            'Reverse',
+            '+2',
+            '+4',
+            'Wild',
+            ...BOMBOCLATT_CARD_VALUES,
+          ].includes(eff.card.value);
           soundFx.playCard(isPower);
         }
+      } else if (eff.kind === 'crow_feathers') {
+        soundFx.playCrow();
+      } else if (eff.kind === 'rizz_line') {
+        soundFx.playRizz();
+      } else if (eff.kind === 'steal_power') {
+        soundFx.playSteal();
+      } else if (eff.kind === 'surjo_ko') {
+        soundFx.playEliminate();
       } else if (eff.kind === 'uno') {
         soundFx.playUno();
       } else if (eff.kind === 'uno_penalty' || eff.kind === 'mercy_ko') {
@@ -573,7 +625,7 @@ export default function App() {
       } else if (eff.kind === 'roulette' || eff.kind === 'dump') {
         soundFx.playMegaPower();
       } else if (eff.kind === 'win') {
-        soundFx.playWin(eff.milestone);
+        soundFx.playWin(eff.milestone, themeIdRef.current);
       }
     }
   }, []);
@@ -582,6 +634,10 @@ export default function App() {
     (effects: EffectEvent[] = []) => {
       const s = soloRef.current;
       if (!s) return;
+      const nowMs = Date.now();
+      if (s.peekTarget && nowMs >= s.peekTarget.expiresAt) {
+        s.peekTarget = null;
+      }
       const selfSeat = s.seats[0];
       const primaryOpp = s.seats[1] ?? s.seats[0];
       const bestOppScore = s.seats.reduce(
@@ -630,6 +686,23 @@ export default function App() {
         score: { self: selfSeat.score, opponent: bestOppScore },
         message: s.message,
         roundId: s.roundId,
+        serverNow: nowMs,
+        pendingRizzPrompt:
+          s.pendingRizz && s.pendingRizz.targetIndex === 0
+            ? {
+                promptId: s.pendingRizz.promptId,
+                fromIndex: s.pendingRizz.fromIndex,
+                fromName: s.seats[s.pendingRizz.fromIndex]?.name ?? 'CPU',
+                line: s.pendingRizz.line,
+              }
+            : null,
+        peekTarget:
+          s.peekTarget && nowMs < s.peekTarget.expiresAt
+            ? {
+                ...s.peekTarget,
+                cards: [...s.peekTarget.cards],
+              }
+            : null,
       };
       setSoloView(view);
       if (s.turn === 'over' && s.winner) {
@@ -657,6 +730,8 @@ export default function App() {
       setPendingWildUid(null);
       setWinMilestone(null);
       setNetworkError(null);
+      setDismissedPeekKey(null);
+      setRizzBusyPromptId(null);
       const effectiveName = (nameOverride ?? playerName).trim() || 'Player';
       const effectiveDiff = difficultyOverride ?? difficulty;
       const effectiveCount = clampPlayerCount(playerCountOverride ?? playerCount);
@@ -696,14 +771,19 @@ export default function App() {
         drawnUid: null,
         pendingDrawStack: 0,
         pendingDrawMin: 0,
+        goonerSurjoUsed: false,
+        pendingRizz: null,
+        peekTarget: null,
         winner: null,
         winnerIndex: null,
         winnerName: null,
         message: jasirBoost
           ? 'j4s1r POWER-UP: 7 power cards dealt!'
-          : effectiveDiff === 'no_mercy'
-            ? 'NO MERCY MODE — 25+ cards = KO!'
-            : `Shuffling & dealing (${effectiveCount} players)...`,
+          : effectiveDiff === 'bomboclatt'
+            ? 'BOMBOCLATT MODE — 50-card KO limit & chaos cards!'
+            : effectiveDiff === 'no_mercy'
+              ? 'NO MERCY MODE — 25+ cards = KO!'
+              : `Shuffling & dealing (${effectiveCount} players)...`,
         roundId: nextRoundId,
       };
 
@@ -720,9 +800,11 @@ export default function App() {
         s.turnIndex = 0;
         s.message = jasirBoost
           ? 'j4s1r POWER-UP active — your turn!'
-          : effectiveDiff === 'no_mercy'
-            ? 'Your turn — stack draw cards or show No Mercy.'
-            : 'Your turn — match the color or number.';
+          : effectiveDiff === 'bomboclatt'
+            ? 'Your turn — stack draws or unleash Bomboclatt cards!'
+            : effectiveDiff === 'no_mercy'
+              ? 'Your turn — stack draw cards or show No Mercy.'
+              : 'Your turn — match the color or number.';
         syncSoloToView([
           { kind: 'banner', text: 'YOUR TURN', color: activeTheme.accent, size: 0.55, dur: 0.9 },
         ]);
@@ -749,7 +831,82 @@ export default function App() {
 
   const recycleSoloHand = (s: SoloInternalState, hand: Card[]) => {
     if (hand.length === 0) return;
-    s.deck.unshift(...hand.splice(0, hand.length));
+    const kept = hand
+      .splice(0, hand.length)
+      .filter((c) => !(s.goonerSurjoUsed && c.value === 'Gooner Surjo'));
+    if (kept.length > 0) {
+      s.deck.unshift(...kept);
+    }
+  };
+
+  const drawSoloOne = (
+    s: SoloInternalState,
+    targetHand: Card[]
+  ): { card: Card | null; reshuffled: boolean } => {
+    const res = drawOneFromDeck(s.deck, s.discard, targetHand);
+    if (res.reshuffled && s.goonerSurjoUsed) {
+      for (let i = s.deck.length - 1; i >= 0; i--) {
+        if (s.deck[i].value === 'Gooner Surjo') {
+          s.deck.splice(i, 1);
+        }
+      }
+      if (res.card && res.card.value === 'Gooner Surjo') {
+        const idx = targetHand.findIndex((c) => c.uid === res.card!.uid);
+        if (idx !== -1) targetHand.splice(idx, 1);
+        const retry = drawOneFromDeck(s.deck, s.discard, targetHand);
+        return { card: retry.card, reshuffled: res.reshuffled || retry.reshuffled };
+      }
+    }
+    return res;
+  };
+
+  const endSoloRoundWithWinner = (
+    s: SoloInternalState,
+    winnerSeat: SoloSeat,
+    expectedRound: number,
+    busyMessage: string,
+    winMessage: string,
+    baseEffects: EffectEvent[]
+  ) => {
+    s.pendingDrawStack = 0;
+    s.pendingDrawMin = 0;
+    s.pendingRizz = null;
+    s.peekTarget = null;
+    s.turn = 'busy';
+    s.message = busyMessage;
+    syncSoloToView(baseEffects);
+    scheduleSolo(900, () => {
+      const st = soloRef.current;
+      if (!st || st.roundId !== expectedRound) return;
+      winnerSeat.score += 1;
+      st.winner = winnerSeat.index === 0 ? 'host' : 'guest';
+      st.winnerIndex = winnerSeat.index;
+      st.winnerName = winnerSeat.name;
+      st.turn = 'over';
+      st.message = winMessage;
+      if (winnerSeat.index === 0) {
+        const milestone = recordSelfWin(`solo-${expectedRound}`);
+        syncSoloToView([
+          {
+            kind: 'win',
+            winnerRole: 'host',
+            winnerIndex: 0,
+            winnerName: winnerSeat.name,
+            milestone,
+          },
+        ]);
+      } else {
+        setWinMilestone(null);
+        syncSoloToView([
+          {
+            kind: 'win',
+            winnerRole: 'guest',
+            winnerIndex: winnerSeat.index,
+            winnerName: winnerSeat.name,
+          },
+        ]);
+      }
+    });
   };
 
   const triggerSoloMercyKo = (
@@ -758,7 +915,8 @@ export default function App() {
     expectedRound: number,
     baseEffects: EffectEvent[]
   ): boolean => {
-    if (s.difficulty !== 'no_mercy' || loserSeat.hand.length < MERCY_HAND_LIMIT) {
+    const limit = getHandLimit(s.difficulty);
+    if (limit === null || loserSeat.hand.length < limit) {
       return false;
     }
     loserSeat.eliminated = true;
@@ -771,44 +929,15 @@ export default function App() {
     ];
 
     if (alive.length <= 1 || isSelfLoser) {
-      const winnerSeat = isSelfLoser
-        ? alive[0] ?? s.seats[1]
-        : alive[0] ?? s.seats[0];
-      s.turn = 'busy';
-      s.message = `MERCY KO! ${loserSeat.name} reached 25+ cards!`;
-      syncSoloToView(koEffects);
-      scheduleSolo(900, () => {
-        const st = soloRef.current;
-        if (!st || st.roundId !== expectedRound) return;
-        winnerSeat.score += 1;
-        st.winner = winnerSeat.index === 0 ? 'host' : 'guest';
-        st.winnerIndex = winnerSeat.index;
-        st.winnerName = winnerSeat.name;
-        st.turn = 'over';
-        st.message = `${winnerSeat.name} wins by Mercy Rule KO!`;
-        if (winnerSeat.index === 0) {
-          const milestone = recordSelfWin(`solo-${expectedRound}`);
-          syncSoloToView([
-            {
-              kind: 'win',
-              winnerRole: 'host',
-              winnerIndex: 0,
-              winnerName: winnerSeat.name,
-              milestone,
-            },
-          ]);
-        } else {
-          setWinMilestone(null);
-          syncSoloToView([
-            {
-              kind: 'win',
-              winnerRole: 'guest',
-              winnerIndex: winnerSeat.index,
-              winnerName: winnerSeat.name,
-            },
-          ]);
-        }
-      });
+      const winnerSeat = isSelfLoser ? alive[0] ?? s.seats[1] : alive[0] ?? s.seats[0];
+      endSoloRoundWithWinner(
+        s,
+        winnerSeat,
+        expectedRound,
+        `MERCY KO! ${loserSeat.name} reached ${limit}+ cards!`,
+        `${winnerSeat.name} wins by Mercy Rule KO!`,
+        koEffects
+      );
       return true;
     }
 
@@ -854,7 +983,7 @@ export default function App() {
         const stackCount = s.pendingDrawStack;
         const effs: EffectEvent[] = [{ kind: 'seat_draw', seatIndex: cpuSeat.index, count: stackCount }];
         for (let i = 0; i < stackCount; i++) {
-          const res = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
+          const res = drawSoloOne(s, cpuSeat.hand);
           if (res.reshuffled) effs.push({ kind: 'reshuffle' });
         }
         s.pendingDrawStack = 0;
@@ -882,7 +1011,7 @@ export default function App() {
       }
 
       if (!chosen) {
-        const { card, reshuffled } = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
+        const { card, reshuffled } = drawSoloOne(s, cpuSeat.hand);
         const effs: EffectEvent[] = [
           ...(card ? [{ kind: 'seat_draw', seatIndex: cpuSeat.index, count: 1 } as EffectEvent] : []),
           ...(reshuffled ? [{ kind: 'reshuffle' } as EffectEvent] : []),
@@ -927,6 +1056,317 @@ export default function App() {
     [recordSelfWin, scheduleSolo, syncSoloToView]
   );
 
+  const handleSoloRizzResponse = useCallback(
+    (accept: boolean) => {
+      const s = soloRef.current;
+      if (!s || !s.pendingRizz || s.winner) return;
+      const pending = s.pendingRizz;
+      s.pendingRizz = null;
+      setRizzBusyPromptId(null);
+
+      const expectedRound = s.roundId;
+      const fromSeat = s.seats[pending.fromIndex];
+      const selfSeat = s.seats[0];
+      const effects: EffectEvent[] = [];
+
+      if (accept && fromSeat && selfSeat.hand.length > 0) {
+        const pickIdx = Math.floor(Math.random() * selfSeat.hand.length);
+        const [gifted] = selfSeat.hand.splice(pickIdx, 1);
+        fromSeat.hand.push(gifted);
+        effects.push({
+          kind: 'rizz_line',
+          fromName: fromSeat.name,
+          targetName: selfSeat.name,
+          line: pending.line,
+          accepted: true,
+          seatIndex: fromSeat.index,
+          targetIndex: 0,
+        });
+
+        if (selfSeat.hand.length === 0) {
+          endSoloRoundWithWinner(
+            s,
+            selfSeat,
+            expectedRound,
+            'You gifted your final card to Rizzler Arvin!',
+            'You win by giving away your final card!',
+            effects
+          );
+          return;
+        }
+        if (triggerSoloMercyKo(s, fromSeat, expectedRound, effects)) return;
+        s.message = `You accepted Rizzler Arvin 👍 (+1 card to ${fromSeat.name})!`;
+      } else {
+        effects.push({
+          kind: 'rizz_line',
+          fromName: fromSeat?.name ?? 'CPU',
+          targetName: selfSeat.name,
+          line: pending.line,
+          accepted: false,
+          seatIndex: pending.fromIndex,
+          targetIndex: 0,
+        });
+        s.message = 'You curved Rizzler Arvin 👎 — match continues!';
+      }
+
+      const nextIdx =
+        s.seats[pending.nextTurnIndex] && !s.seats[pending.nextTurnIndex].eliminated
+          ? pending.nextTurnIndex
+          : advanceSoloIndex(s, 1);
+      s.turn = 'busy';
+      syncSoloToView(effects);
+      scheduleSolo(650, () => {
+        const st = soloRef.current;
+        if (!st || st.roundId !== expectedRound || st.winner) return;
+        st.turnIndex = nextIdx;
+        const nextSeat = st.seats[nextIdx];
+        st.turn = nextIdx === 0 ? 'host' : 'guest';
+        st.message = `${nextSeat.name}'s turn (${st.currentColor}).`;
+        syncSoloToView();
+        if (nextSeat.isCpu) {
+          scheduleSolo(650, () => runCpuTurn(expectedRound));
+        }
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [runCpuTurn, scheduleSolo, syncSoloToView]
+  );
+
+  const resolveSoloSpecialPlay = (
+    s: SoloInternalState,
+    actor: SoloSeat,
+    card: Card,
+    chosenColor: SuitColor,
+    expectedRound: number,
+    effects: EffectEvent[],
+    penalizedUno: boolean,
+    scheduleNextTurn: (nextIdx: number, delayMs: number, nextMessage?: string) => void
+  ): boolean => {
+    const aliveSeats = s.seats.filter((seat) => !seat.eliminated);
+    const aliveOpponents = aliveSeats.filter((seat) => seat.index !== actor.index);
+
+    if (card.value === 'Rizzler Arvin') {
+      const targetSeat =
+        aliveOpponents.length > 0
+          ? aliveOpponents[Math.floor(Math.random() * aliveOpponents.length)]
+          : null;
+      const line = RIZZ_PICKUP_LINES[Math.floor(Math.random() * RIZZ_PICKUP_LINES.length)];
+      if (!targetSeat) {
+        const nextIdx = advanceSoloIndex(s, 1);
+        s.message = `${actor.name} played Rizzler Arvin!`;
+        scheduleNextTurn(nextIdx, 700);
+        return true;
+      }
+      if (targetSeat.index === 0) {
+        s.pendingRizz = {
+          promptId: `rizz-${expectedRound}-${Date.now()}`,
+          fromIndex: actor.index,
+          targetIndex: 0,
+          line,
+          nextTurnIndex: advanceSoloIndex(s, 1),
+        };
+        s.turn = 'busy';
+        s.message = `${actor.name} hit you with Rizzler Arvin!`;
+        effects.push({
+          kind: 'rizz_line',
+          fromName: actor.name,
+          targetName: targetSeat.name,
+          line,
+          seatIndex: actor.index,
+          targetIndex: 0,
+        });
+        syncSoloToView(effects);
+        return true;
+      }
+
+      // Opponent is a CPU
+      const accepted = targetSeat.hand.length > 0 && Math.random() < 0.45;
+      if (accepted) {
+        const pickIdx = Math.floor(Math.random() * targetSeat.hand.length);
+        const [gifted] = targetSeat.hand.splice(pickIdx, 1);
+        actor.hand.push(gifted);
+        effects.push({
+          kind: 'rizz_line',
+          fromName: actor.name,
+          targetName: targetSeat.name,
+          line,
+          accepted: true,
+          seatIndex: actor.index,
+          targetIndex: targetSeat.index,
+        });
+        if (targetSeat.hand.length === 0) {
+          endSoloRoundWithWinner(
+            s,
+            targetSeat,
+            expectedRound,
+            `${targetSeat.name} accepted Rizzler Arvin 👍 and gave away its last card!`,
+            `${targetSeat.name} wins!`,
+            effects
+          );
+          return true;
+        }
+        if (triggerSoloMercyKo(s, actor, expectedRound, effects)) return true;
+      } else {
+        effects.push({
+          kind: 'rizz_line',
+          fromName: actor.name,
+          targetName: targetSeat.name,
+          line,
+          accepted: false,
+          seatIndex: actor.index,
+          targetIndex: targetSeat.index,
+        });
+      }
+      const nextIdx = advanceSoloIndex(s, 1);
+      const nextSeat = s.seats[nextIdx];
+      s.message = accepted
+        ? `${targetSeat.name} loved Rizzler Arvin 👍 (+1 card)! ${nextSeat.name}'s turn.`
+        : `${targetSeat.name} curved Rizzler Arvin 👎! ${nextSeat.name}'s turn.`;
+      scheduleNextTurn(nextIdx, 950);
+      return true;
+    }
+
+    if (card.value === 'Rafath Kauwa') {
+      const targetSeat =
+        aliveOpponents.length > 0
+          ? aliveOpponents[Math.floor(Math.random() * aliveOpponents.length)]
+          : null;
+      if (targetSeat) {
+        effects.push({
+          kind: 'crow_feathers',
+          whoName: actor.name,
+          targetName: targetSeat.name,
+          seatIndex: actor.index,
+          targetIndex: targetSeat.index,
+        });
+        if (actor.index === 0) {
+          setDismissedPeekKey(null);
+          s.peekTarget = {
+            targetIndex: targetSeat.index,
+            targetName: targetSeat.name,
+            cards: [...targetSeat.hand],
+            expiresAt: Date.now() + 7500,
+          };
+          scheduleSolo(7550, () => {
+            const st = soloRef.current;
+            if (!st || st.roundId !== expectedRound) return;
+            if (st.peekTarget && Date.now() >= st.peekTarget.expiresAt) {
+              st.peekTarget = null;
+              syncSoloToView();
+            }
+          });
+        }
+      }
+      const nextIdx = advanceSoloIndex(s, 1);
+      const nextSeat = s.seats[nextIdx];
+      s.message =
+        actor.index === 0 && targetSeat
+          ? `KAAAW! Peeking ${targetSeat.name}'s hand for 7.5s! ${nextSeat.name}'s turn.`
+          : `KAAAW! ${actor.name} unleashed Rafath Kauwa! ${nextSeat.name}'s turn.`;
+      scheduleNextTurn(nextIdx, 950);
+      return true;
+    }
+
+    if (card.value === 'Gooner Surjo') {
+      if (s.goonerSurjoUsed) {
+        const nextIdx = advanceSoloIndex(s, 1);
+        s.message = `Gooner Surjo already used this game!`;
+        scheduleNextTurn(nextIdx, 700);
+        return true;
+      }
+      s.goonerSurjoUsed = true;
+      const targetSeat =
+        aliveOpponents.length > 0
+          ? aliveOpponents[Math.floor(Math.random() * aliveOpponents.length)]
+          : null;
+      if (targetSeat) {
+        targetSeat.eliminated = true;
+        recycleSoloHand(s, targetSeat.hand);
+        effects.push({
+          kind: 'surjo_ko',
+          whoName: actor.name,
+          targetName: targetSeat.name,
+          isSelfLoser: targetSeat.index === 0,
+          seatIndex: actor.index,
+          targetIndex: targetSeat.index,
+        });
+        const remaining = s.seats.filter((seat) => !seat.eliminated);
+        if (remaining.length <= 1 || targetSeat.index === 0) {
+          const winnerSeat = targetSeat.index === 0 ? remaining[0] ?? actor : remaining[0] ?? actor;
+          endSoloRoundWithWinner(
+            s,
+            winnerSeat,
+            expectedRound,
+            `GOONER SURJO! ${targetSeat.name} eliminated!`,
+            `${winnerSeat.name} wins after Gooner Surjo eliminated ${targetSeat.name}!`,
+            effects
+          );
+          return true;
+        }
+        const nextIdx = advanceSoloIndex(s, 1);
+        const nextSeat = s.seats[nextIdx];
+        s.message = `GOONER SURJO! ${targetSeat.name} eliminated! ${nextSeat.name}'s turn.`;
+        scheduleNextTurn(nextIdx, 1050);
+        return true;
+      }
+      const nextIdx = advanceSoloIndex(s, 1);
+      scheduleNextTurn(nextIdx, 750);
+      return true;
+    }
+
+    if (card.value === 'Toothpick Alif') {
+      const candidates = aliveOpponents.filter((opp) =>
+        opp.hand.some((c) => POWER_CARD_VALUES.has(c.value))
+      );
+      if (candidates.length > 0) {
+        const victimSeat = candidates[Math.floor(Math.random() * candidates.length)];
+        const powerIndices = victimSeat.hand
+          .map((c, i) => (POWER_CARD_VALUES.has(c.value) ? i : -1))
+          .filter((i) => i >= 0);
+        const stealIdx = powerIndices[Math.floor(Math.random() * powerIndices.length)];
+        const [stolenCard] = victimSeat.hand.splice(stealIdx, 1);
+        actor.hand.push(stolenCard);
+        if (victimSeat.hand.length === 0) {
+          const rep = drawSoloOne(s, victimSeat.hand);
+          if (rep.reshuffled) effects.push({ kind: 'reshuffle' });
+          if (rep.card) effects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: 1 });
+        }
+        effects.push({
+          kind: 'steal_power',
+          thiefName: actor.name,
+          victimName: victimSeat.name,
+          stolenCard: actor.index === 0 || victimSeat.index === 0 ? stolenCard : undefined,
+          thiefIndex: actor.index,
+          victimIndex: victimSeat.index,
+        });
+        if (triggerSoloMercyKo(s, actor, expectedRound, effects)) return true;
+        const nextIdx = advanceSoloIndex(s, 1);
+        const nextSeat = s.seats[nextIdx];
+        s.message = `TOOTHPICK ALIF! ${actor.name} stole ${
+          actor.index === 0 || victimSeat.index === 0 ? stolenCard.value : 'a power card'
+        } from ${victimSeat.name}! ${nextSeat.name}'s turn.`;
+        scheduleNextTurn(nextIdx, 950);
+        return true;
+      }
+      effects.push({
+        kind: 'banner',
+        text: 'NO POWER CARDS TO STEAL!',
+        color: '#eab308',
+        size: 0.6,
+        dur: 1.0,
+      });
+      const nextIdx = advanceSoloIndex(s, 1);
+      const nextSeat = s.seats[nextIdx];
+      s.message =
+        (penalizedUno ? 'Forgot UNO! ' : '') +
+        `Toothpick Alif found no power cards (${chosenColor}). ${nextSeat.name}'s turn.`;
+      scheduleNextTurn(nextIdx, 800);
+      return true;
+    }
+
+    return false;
+  };
+
   const commitCpuCard = useCallback(
     (card: Card, expectedRound: number) => {
       const s = soloRef.current;
@@ -965,30 +1405,14 @@ export default function App() {
       effects.push({ kind: 'impact', card, activeColor: nextColor, seatIndex: cpuSeat.index });
 
       if (cpuSeat.hand.length === 0) {
-        s.pendingDrawStack = 0;
-        s.pendingDrawMin = 0;
-        s.turn = 'busy';
-        s.message = `${cpuSeat.name} played its last card!`;
-        syncSoloToView(effects);
-        scheduleSolo(700, () => {
-          const st = soloRef.current;
-          if (!st || st.roundId !== expectedRound) return;
-          cpuSeat.score += 1;
-          st.winner = 'guest';
-          st.winnerIndex = cpuSeat.index;
-          st.winnerName = cpuSeat.name;
-          st.turn = 'over';
-          st.message = `${cpuSeat.name} wins this round.`;
-          setWinMilestone(null);
-          syncSoloToView([
-            {
-              kind: 'win',
-              winnerRole: 'guest',
-              winnerIndex: cpuSeat.index,
-              winnerName: cpuSeat.name,
-            },
-          ]);
-        });
+        endSoloRoundWithWinner(
+          s,
+          cpuSeat,
+          expectedRound,
+          `${cpuSeat.name} played its last card!`,
+          `${cpuSeat.name} wins this round.`,
+          effects
+        );
         return;
       }
 
@@ -999,7 +1423,7 @@ export default function App() {
         } else {
           cpuForgotUno = true;
           for (let i = 0; i < 2; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, cpuSeat.hand);
+            const res = drawSoloOne(s, cpuSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
           effects.push({ kind: 'uno_penalty', whoName: cpuSeat.name, isSelf: false, seatIndex: cpuSeat.index });
@@ -1024,11 +1448,26 @@ export default function App() {
         });
       };
 
+      if (
+        resolveSoloSpecialPlay(
+          s,
+          cpuSeat,
+          card,
+          nextColor,
+          expectedRound,
+          effects,
+          cpuForgotUno,
+          scheduleNextTurn
+        )
+      ) {
+        return;
+      }
+
       const aliveCount = s.seats.filter((seat) => !seat.eliminated).length;
       const drawAmount = getDrawAmount(card);
 
       if (drawAmount > 0) {
-        if (s.difficulty === 'no_mercy') {
+        if (isNoMercyRuleset(s.difficulty)) {
           s.pendingDrawStack += drawAmount;
           s.pendingDrawMin = drawAmount;
           const nextIdx = advanceSoloIndex(s, 1);
@@ -1039,7 +1478,7 @@ export default function App() {
           const victimIdx = advanceSoloIndex(s, 1);
           const victimSeat = s.seats[victimIdx];
           for (let i = 0; i < drawAmount; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, victimSeat.hand);
+            const res = drawSoloOne(s, victimSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
           effects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: drawAmount });
@@ -1056,6 +1495,17 @@ export default function App() {
         const victimIdx = advanceSoloIndex(s, 1);
         const victimSeat = s.seats[victimIdx];
         const rRes = drawColorRoulette(s.deck, s.discard, victimSeat.hand, nextColor);
+        if (s.goonerSurjoUsed) {
+          for (let i = s.deck.length - 1; i >= 0; i--) {
+            if (s.deck[i].value === 'Gooner Surjo') s.deck.splice(i, 1);
+          }
+          for (let i = victimSeat.hand.length - 1; i >= 0; i--) {
+            if (victimSeat.hand[i].value === 'Gooner Surjo') {
+              victimSeat.hand.splice(i, 1);
+              drawSoloOne(s, victimSeat.hand);
+            }
+          }
+        }
         if (rRes.reshuffled) effects.push({ kind: 'reshuffle' });
         effects.push({
           kind: 'roulette',
@@ -1153,31 +1603,14 @@ export default function App() {
       effects.push({ kind: 'impact', card, activeColor: chosenColor, seatIndex: 0 });
 
       if (selfSeat.hand.length === 0) {
-        s.pendingDrawStack = 0;
-        s.pendingDrawMin = 0;
-        s.turn = 'busy';
-        s.message = 'Final card played!';
-        syncSoloToView(effects);
-        scheduleSolo(700, () => {
-          const st = soloRef.current;
-          if (!st || st.roundId !== expectedRound) return;
-          selfSeat.score += 1;
-          st.winner = 'host';
-          st.winnerIndex = 0;
-          st.winnerName = selfSeat.name;
-          st.turn = 'over';
-          st.message = 'You win the round!';
-          const milestone = recordSelfWin(`solo-${expectedRound}`);
-          syncSoloToView([
-            {
-              kind: 'win',
-              winnerRole: 'host',
-              winnerIndex: 0,
-              winnerName: selfSeat.name,
-              milestone,
-            },
-          ]);
-        });
+        endSoloRoundWithWinner(
+          s,
+          selfSeat,
+          expectedRound,
+          'Final card played!',
+          'You win the round!',
+          effects
+        );
         return;
       }
 
@@ -1188,7 +1621,7 @@ export default function App() {
         } else {
           penalizedUno = true;
           for (let i = 0; i < 2; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, selfSeat.hand);
+            const res = drawSoloOne(s, selfSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
           effects.push({ kind: 'uno_penalty', whoName: selfSeat.name, isSelf: true });
@@ -1212,11 +1645,26 @@ export default function App() {
         });
       };
 
+      if (
+        resolveSoloSpecialPlay(
+          s,
+          selfSeat,
+          card,
+          chosenColor,
+          expectedRound,
+          effects,
+          penalizedUno,
+          scheduleNextTurn
+        )
+      ) {
+        return;
+      }
+
       const aliveCount = s.seats.filter((seat) => !seat.eliminated).length;
       const drawAmount = getDrawAmount(card);
 
       if (drawAmount > 0) {
-        if (s.difficulty === 'no_mercy') {
+        if (isNoMercyRuleset(s.difficulty)) {
           s.pendingDrawStack += drawAmount;
           s.pendingDrawMin = drawAmount;
           const nextIdx = advanceSoloIndex(s, 1);
@@ -1229,7 +1677,7 @@ export default function App() {
           const victimIdx = advanceSoloIndex(s, 1);
           const victimSeat = s.seats[victimIdx];
           for (let i = 0; i < drawAmount; i++) {
-            const res = drawOneFromDeck(s.deck, s.discard, victimSeat.hand);
+            const res = drawSoloOne(s, victimSeat.hand);
             if (res.reshuffled) effects.push({ kind: 'reshuffle' });
           }
           effects.push({ kind: 'seat_draw', seatIndex: victimSeat.index, count: drawAmount });
@@ -1248,6 +1696,17 @@ export default function App() {
         const victimIdx = advanceSoloIndex(s, 1);
         const victimSeat = s.seats[victimIdx];
         const rRes = drawColorRoulette(s.deck, s.discard, victimSeat.hand, chosenColor);
+        if (s.goonerSurjoUsed) {
+          for (let i = s.deck.length - 1; i >= 0; i--) {
+            if (s.deck[i].value === 'Gooner Surjo') s.deck.splice(i, 1);
+          }
+          for (let i = victimSeat.hand.length - 1; i >= 0; i--) {
+            if (victimSeat.hand[i].value === 'Gooner Surjo') {
+              victimSeat.hand.splice(i, 1);
+              drawSoloOne(s, victimSeat.hand);
+            }
+          }
+        }
         if (rRes.reshuffled) effects.push({ kind: 'reshuffle' });
         effects.push({
           kind: 'roulette',
@@ -1432,6 +1891,7 @@ export default function App() {
         setRoomBusy(false);
         setStartingMatch(false);
         setVotingSeatIndex(null);
+        setRizzBusyPromptId(null);
         setNetworkError(null);
         setMode('multiplayer');
         setMultiView(msg.view);
@@ -1791,7 +2251,7 @@ export default function App() {
       const stackCount = s.pendingDrawStack;
       const effs: EffectEvent[] = [];
       for (let i = 0; i < stackCount; i++) {
-        const res = drawOneFromDeck(s.deck, s.discard, selfSeat.hand);
+        const res = drawSoloOne(s, selfSeat.hand);
         if (res.reshuffled) effs.push({ kind: 'reshuffle' });
       }
       s.pendingDrawStack = 0;
@@ -1827,7 +2287,7 @@ export default function App() {
       return;
     }
 
-    const { card, reshuffled } = drawOneFromDeck(s.deck, s.discard, selfSeat.hand);
+    const { card, reshuffled } = drawSoloOne(s, selfSeat.hand);
     const effects: EffectEvent[] = reshuffled ? [{ kind: 'reshuffle' }] : [];
     soundFx.playDraw();
 
@@ -2066,9 +2526,44 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [activeView, mode, screen]);
 
+  const handleRizzPromptChoice = useCallback(
+    (promptId: string, accept: boolean) => {
+      setRizzBusyPromptId(promptId);
+      if (mode === 'multiplayer') {
+        sendWsAction({ type: 'rizz_response', promptId, accept });
+      } else {
+        handleSoloRizzResponse(accept);
+      }
+    },
+    [handleSoloRizzResponse, mode, sendWsAction]
+  );
+
+  useEffect(() => {
+    const peek = activeView?.peekTarget;
+    if (screen !== 'PLAYING' || !peek) {
+      setPeekSecondsLeft(0);
+      return;
+    }
+    const updatePeek = () => {
+      const serverNowEstimate = Date.now() + (mode === 'multiplayer' ? clockOffsetRef.current : 0);
+      const secs = Math.max(0, (peek.expiresAt - serverNowEstimate) / 1000);
+      setPeekSecondsLeft(secs);
+    };
+    updatePeek();
+    const id = window.setInterval(updatePeek, 100);
+    return () => window.clearInterval(id);
+  }, [activeView?.peekTarget, mode, screen]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (showNameModal || showQrModal || showPlayersModal || screen === 'TITLE_MENU') return;
+      if (
+        showNameModal ||
+        showQrModal ||
+        showPlayersModal ||
+        activeView?.pendingRizzPrompt ||
+        screen === 'TITLE_MENU'
+      )
+        return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       if (pendingWildUid !== null) {
@@ -2103,6 +2598,7 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    activeView?.pendingRizzPrompt,
     activeView?.turn,
     handleCallUno,
     handleDrawOrPass,
@@ -2416,7 +2912,7 @@ export default function App() {
                   />
                   <AnimatePresence mode="wait">
                     <motion.div
-                      key={`${themeId}-${difficulty === 'no_mercy' ? 'nm' : 'std'}`}
+                      key={`${themeId}-${difficulty === 'bomboclatt' ? 'bm' : difficulty === 'no_mercy' ? 'nm' : 'std'}`}
                       initial={{ opacity: 0, scale: 0.9 }}
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.9 }}
@@ -2426,7 +2922,13 @@ export default function App() {
                       <ShowcaseCard
                         theme={activeTheme}
                         suit="Blue"
-                        label={difficulty === 'no_mercy' ? '⊘⊘' : '7'}
+                        label={
+                          difficulty === 'bomboclatt'
+                            ? 'SURJO'
+                            : difficulty === 'no_mercy'
+                              ? '⊘⊘'
+                              : '7'
+                        }
                         rotate={-16}
                         xOffset={-56}
                         yOffset={10}
@@ -2436,7 +2938,13 @@ export default function App() {
                       <ShowcaseCard
                         theme={activeTheme}
                         suit="Red"
-                        label={difficulty === 'no_mercy' ? 'ALL' : '+2'}
+                        label={
+                          difficulty === 'bomboclatt'
+                            ? 'RIZZ'
+                            : difficulty === 'no_mercy'
+                              ? 'ALL'
+                              : '+2'
+                        }
                         rotate={0}
                         xOffset={0}
                         yOffset={-8}
@@ -2446,7 +2954,13 @@ export default function App() {
                       <ShowcaseCard
                         theme={activeTheme}
                         suit="Wild"
-                        label={difficulty === 'no_mercy' ? '+10' : '+4'}
+                        label={
+                          difficulty === 'bomboclatt'
+                            ? 'KAUWA'
+                            : difficulty === 'no_mercy'
+                              ? '+10'
+                              : '+4'
+                        }
                         rotate={16}
                         xOffset={56}
                         yOffset={10}
@@ -2583,18 +3097,20 @@ export default function App() {
                           style={{ color: activeDifficulty.accent }}
                         >
                           {difficulty === 'no_mercy' && <Skull className="w-3.5 h-3.5" />}
+                          {difficulty === 'bomboclatt' && <Zap className="w-3.5 h-3.5" />}
                           <span>{activeDifficulty.tier}</span>
                         </span>
                       </div>
 
                       <div
-                        className="grid grid-cols-4 gap-1 p-1 rounded-xl border bg-black/25"
+                        className="grid grid-cols-6 sm:grid-cols-5 gap-1 p-1 rounded-xl border bg-black/25"
                         style={{ borderColor: activeTheme.surfaceBorder }}
                         role="radiogroup"
                         aria-label="Difficulty level"
                       >
-                        {DIFFICULTY_LIST.map((d) => {
+                        {DIFFICULTY_LIST.map((d, idx) => {
                           const selected = d.id === difficulty;
+                          const mobileSpan = idx < 3 ? 'col-span-2 sm:col-span-1' : 'col-span-3 sm:col-span-1';
                           return (
                             <button
                               key={d.id}
@@ -2602,7 +3118,7 @@ export default function App() {
                               role="radio"
                               aria-checked={selected}
                               onClick={() => selectDifficulty(d.id)}
-                              className={`h-9 rounded-lg text-xs font-bold transition-all whitespace-nowrap px-1.5 focus-visible:outline-2 focus-visible:outline-white ${
+                              className={`${mobileSpan} h-9 rounded-lg text-[11px] sm:text-xs font-bold transition-all whitespace-nowrap px-1.5 focus-visible:outline-2 focus-visible:outline-white ${
                                 selected ? 'text-[#10141e] shadow-sm' : 'text-[#b8cac8] hover:text-white'
                               }`}
                               style={selected ? { backgroundColor: d.accent } : undefined}
@@ -2784,11 +3300,15 @@ export default function App() {
                   </div>
                   <div className="text-xs text-[#9fb3b0] font-mono-tabular">
                     {activeView.opponentCount} card{activeView.opponentCount === 1 ? '' : 's'}
-                    {activeView.difficulty === 'no_mercy' && activeView.opponentCount >= 16 ? (
-                      <span className="ml-1.5 font-bold text-[#f43f5e]">
-                        ({activeView.opponentCount}/{MERCY_HAND_LIMIT} KO)
-                      </span>
-                    ) : null}
+                    {(() => {
+                      const limit = getHandLimit(activeView.difficulty);
+                      const warn = limit ? Math.ceil(limit * 0.64) : 0;
+                      return limit !== null && activeView.opponentCount >= warn ? (
+                        <span className="ml-1.5 font-bold text-[#f43f5e]">
+                          ({activeView.opponentCount}/{limit} KO)
+                        </span>
+                      ) : null;
+                    })()}
                     {mode === 'multiplayer' && !activeView.opponentConnected ? ' · waiting' : ''}
                   </div>
                 </div>
@@ -2827,11 +3347,15 @@ export default function App() {
                   </div>
                   <div className="text-xs text-[#9fb3b0] font-mono-tabular">
                     {activeView.selfHand.length} card{activeView.selfHand.length === 1 ? '' : 's'}
-                    {activeView.difficulty === 'no_mercy' && activeView.selfHand.length >= 16 ? (
-                      <span className="ml-1.5 font-bold text-[#f43f5e]">
-                        ({activeView.selfHand.length}/{MERCY_HAND_LIMIT} KO)
-                      </span>
-                    ) : null}
+                    {(() => {
+                      const limit = getHandLimit(activeView.difficulty);
+                      const warn = limit ? Math.ceil(limit * 0.64) : 0;
+                      return limit !== null && activeView.selfHand.length >= warn ? (
+                        <span className="ml-1.5 font-bold text-[#f43f5e]">
+                          ({activeView.selfHand.length}/{limit} KO)
+                        </span>
+                      ) : null;
+                    })()}
                   </div>
                 </div>
               </div>
@@ -2934,7 +3458,7 @@ export default function App() {
                 pendingWildUid === null &&
                 !activeView.selfUnoArmed &&
                 (activeView.selfHand.length === 2 ||
-                  (activeView.difficulty === 'no_mercy' &&
+                  (isNoMercyRuleset(activeView.difficulty) &&
                     activeView.selfHand.length >= 2 &&
                     activeView.selfHand.some((c) => c.value === 'Dump')));
               const isLowTime = turnSecondsLeft !== null && turnSecondsLeft <= 5;
@@ -3140,6 +3664,162 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Rafath Kauwa 7.5s Opponent Hand Peek Overlay */}
+      <AnimatePresence>
+        {screen === 'PLAYING' &&
+          activeView?.peekTarget &&
+          peekSecondsLeft > 0 &&
+          dismissedPeekKey !== `${activeView.peekTarget.targetIndex}-${activeView.peekTarget.expiresAt}` && (() => {
+            const peek = activeView.peekTarget!;
+            const peekKey = `${peek.targetIndex}-${peek.expiresAt}`;
+            const pct = Math.max(0, Math.min(100, (peekSecondsLeft / 7.5) * 100));
+            return (
+              <motion.div
+                key={peekKey}
+                initial={{ opacity: 0, y: -16, scale: 0.94 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -12, scale: 0.94 }}
+                transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+                className="fixed top-16 left-1/2 -translate-x-1/2 z-[35] w-[92vw] max-w-md rounded-2xl border p-4 shadow-2xl backdrop-blur-md"
+                style={{
+                  backgroundColor: 'rgba(15, 19, 26, 0.94)',
+                  borderColor: '#94a3b8',
+                }}
+              >
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Eye className="w-4 h-4 text-[#f87171] shrink-0" />
+                    <span className="text-xs sm:text-sm font-bold text-[#f8fafc] truncate">
+                      Rafath Kauwa · {peek.targetName}&apos;s Hand
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs font-mono-tabular font-bold text-[#fca5a5]">
+                      {peekSecondsLeft.toFixed(1)}s
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDismissedPeekKey(peekKey)}
+                      className="h-7 w-7 rounded-lg inline-flex items-center justify-center text-[#94a3b8] hover:text-white hover:bg-white/10"
+                      aria-label="Close peek overlay"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden mb-3">
+                  <div
+                    className="h-full bg-[#ef4444] transition-all duration-100"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+
+                <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
+                  {peek.cards.map((c) => {
+                    const isBomb = (BOMBOCLATT_CARD_VALUES as readonly string[]).includes(c.value);
+                    const chipBg =
+                      c.value === 'Rizzler Arvin'
+                        ? '#be123c'
+                        : c.value === 'Rafath Kauwa'
+                          ? '#1e293b'
+                          : c.value === 'Gooner Surjo'
+                            ? '#0284c7'
+                            : c.value === 'Toothpick Alif'
+                              ? '#581c87'
+                              : activeTheme.suitHex[c.color];
+                    return (
+                      <div
+                        key={c.uid}
+                        className="px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold text-white shadow-sm"
+                        style={{
+                          backgroundColor: chipBg,
+                          borderColor: isBomb ? '#fde047' : 'rgba(255,255,255,0.28)',
+                        }}
+                      >
+                        {c.color === 'Wild' ? c.value : `${c.color.charAt(0)} ${c.value}`}
+                      </div>
+                    );
+                  })}
+                </div>
+              </motion.div>
+            );
+          })()}
+      </AnimatePresence>
+
+      {/* Rizzler Arvin Interactive Pickup Line Modal */}
+      <AnimatePresence>
+        {screen === 'PLAYING' && activeView?.pendingRizzPrompt && (() => {
+          const prompt = activeView.pendingRizzPrompt!;
+          const isBusy = rizzBusyPromptId === prompt.promptId;
+          return (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[45] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="rizz-prompt-title"
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.86, y: 16 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                transition={{ type: 'spring', stiffness: 320, damping: 22 }}
+                className="w-full max-w-md rounded-2xl border-2 p-6 shadow-2xl text-center"
+                style={{
+                  background: 'linear-gradient(160deg, #4c0519 0%, #881337 55%, #be123c 100%)',
+                  borderColor: '#fda4af',
+                }}
+              >
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/30 border border-[#fda4af]/40 text-[#fecdd3] text-[11px] font-extrabold tracking-widest uppercase mb-3">
+                  <Heart className="w-3.5 h-3.5 fill-current text-[#fb7185]" />
+                  <span>Rizzler Arvin · From {prompt.fromName}</span>
+                </div>
+
+                <h2
+                  id="rizz-prompt-title"
+                  className="font-display text-xl sm:text-2xl font-extrabold italic text-white leading-snug mb-3"
+                >
+                  &ldquo;{prompt.line}&rdquo;
+                </h2>
+
+                <p className="text-xs text-[#ffe4e6] mb-5">
+                  Press <strong>👍</strong> to give {prompt.fromName} 1 card from your hand, or{' '}
+                  <strong>👎</strong> to curve &amp; continue.
+                </p>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <motion.button
+                    whileHover={isBusy ? undefined : { scale: 1.04 }}
+                    whileTap={isBusy ? undefined : { scale: 0.96 }}
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => handleRizzPromptChoice(prompt.promptId, true)}
+                    className="h-12 rounded-xl bg-[#fff1f2] text-[#9f1239] font-extrabold text-base shadow-lg inline-flex items-center justify-center gap-2 hover:bg-white disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-white"
+                  >
+                    <ThumbsUp className="w-5 h-5" />
+                    <span>👍</span>
+                  </motion.button>
+                  <motion.button
+                    whileHover={isBusy ? undefined : { scale: 1.04 }}
+                    whileTap={isBusy ? undefined : { scale: 0.96 }}
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => handleRizzPromptChoice(prompt.promptId, false)}
+                    className="h-12 rounded-xl bg-black/45 border border-[#fda4af]/45 text-white font-extrabold text-base shadow-lg inline-flex items-center justify-center gap-2 hover:bg-black/65 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-white"
+                  >
+                    <ThumbsDown className="w-5 h-5" />
+                    <span>👎</span>
+                  </motion.button>
+                </div>
+              </motion.div>
+            </motion.div>
+          );
+        })()}
+      </AnimatePresence>
+
       {/* Victory Overlay */}
       <AnimatePresence>
         {screen === 'GAME_OVER' && activeView && (() => {
@@ -3158,39 +3838,37 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 z-30 flex items-center justify-center bg-black/65 backdrop-blur-sm p-4 overflow-hidden"
+              className="fixed inset-0 z-30 flex items-center justify-center bg-black/52 backdrop-blur-[3px] p-4 overflow-hidden"
               role="dialog"
               aria-modal="true"
               aria-labelledby="winner-title"
             >
-              {/* Ambient rotating halo behind card on victory */}
-              {isSelfWin && (
-                <motion.div
-                  aria-hidden="true"
-                  initial={{ opacity: 0, scale: 0.6 }}
-                  animate={{
-                    opacity: activeMilestone === 10 ? 0.55 : activeMilestone ? 0.42 : 0.28,
-                    scale: [0.95, 1.08, 0.95],
-                    rotate: 360,
-                  }}
-                  transition={{
-                    opacity: { duration: 0.5 },
-                    scale: { duration: 4, repeat: Infinity, ease: 'easeInOut' },
-                    rotate: {
-                      duration: activeMilestone === 10 ? 12 : 18,
-                      repeat: Infinity,
-                      ease: 'linear',
-                    },
-                  }}
-                  className="pointer-events-none absolute w-[460px] h-[460px] rounded-full blur-2xl"
-                  style={{
-                    background:
-                      activeMilestone === 10
-                        ? `conic-gradient(from 0deg, ${milestoneGold}55, transparent 22%, ${activeTheme.accent}66, transparent 50%, ${milestoneGold}55, transparent 78%, #ffffff33)`
-                        : `conic-gradient(from 0deg, ${badgeColor}44, transparent 35%, ${activeTheme.accent}44, transparent 75%)`,
-                  }}
-                />
-              )}
+              {/* Ambient rotating halo behind card on victory (visible to all players) */}
+              <motion.div
+                aria-hidden="true"
+                initial={{ opacity: 0, scale: 0.6 }}
+                animate={{
+                  opacity: activeMilestone === 10 ? 0.55 : activeMilestone ? 0.42 : 0.34,
+                  scale: [0.95, 1.08, 0.95],
+                  rotate: 360,
+                }}
+                transition={{
+                  opacity: { duration: 0.5 },
+                  scale: { duration: 4, repeat: Infinity, ease: 'easeInOut' },
+                  rotate: {
+                    duration: activeMilestone === 10 ? 12 : 18,
+                    repeat: Infinity,
+                    ease: 'linear',
+                  },
+                }}
+                className="pointer-events-none absolute w-[460px] h-[460px] rounded-full blur-2xl"
+                style={{
+                  background:
+                    activeMilestone === 10
+                      ? `conic-gradient(from 0deg, ${milestoneGold}55, transparent 22%, ${activeTheme.accent}66, transparent 50%, ${milestoneGold}55, transparent 78%, #ffffff33)`
+                      : `conic-gradient(from 0deg, ${badgeColor}48, transparent 35%, ${activeTheme.accent}48, transparent 75%)`,
+                }}
+              />
 
               <motion.div
                 initial={{ opacity: 0, scale: 0.78, y: 24, rotateX: 12 }}
@@ -3205,10 +3883,8 @@ export default function App() {
                       ? milestoneGold
                       : activeMilestone
                         ? badgeColor
-                        : activeTheme.surfaceBorder,
-                  boxShadow: isSelfWin
-                    ? `0 25px 60px -12px rgba(0,0,0,0.75), 0 0 42px ${badgeColor}33`
-                    : undefined,
+                        : `${activeTheme.accent}88`,
+                  boxShadow: `0 25px 60px -12px rgba(0,0,0,0.75), 0 0 42px ${badgeColor}38`,
                 }}
               >
                 {/* 10th Win sweeping shimmer across top border */}
@@ -3225,97 +3901,95 @@ export default function App() {
                   />
                 )}
 
-                {/* Victory Emblem */}
-                {isSelfWin && (
-                  <div className="relative flex items-center justify-center mb-4 h-24">
-                    {/* Pulse rings for 1st and 10th milestones */}
-                    {(activeMilestone === 1 || activeMilestone === 10) && (
-                      <>
-                        <motion.span
-                          aria-hidden="true"
-                          animate={{ scale: [0.8, 1.85], opacity: [0.65, 0] }}
-                          transition={{ duration: 1.8, repeat: Infinity, ease: 'easeOut' }}
-                          className="absolute w-16 h-16 rounded-full border-2"
-                          style={{ borderColor: badgeColor }}
-                        />
-                        <motion.span
-                          aria-hidden="true"
-                          animate={{ scale: [0.8, 2.2], opacity: [0.45, 0] }}
-                          transition={{ duration: 1.8, delay: 0.6, repeat: Infinity, ease: 'easeOut' }}
-                          className="absolute w-16 h-16 rounded-full border"
-                          style={{ borderColor: activeTheme.accent }}
-                        />
-                      </>
-                    )}
-
-                    {/* Rotating outer crest ring for 10th win */}
-                    {activeMilestone === 10 && (
-                      <motion.div
+                {/* Victory Emblem (visible on every player's screen) */}
+                <div className="relative flex items-center justify-center mb-4 h-24">
+                  {/* Pulse rings for round win & milestones */}
+                  {(activeMilestone === 1 || activeMilestone === 10 || !activeMilestone) && (
+                    <>
+                      <motion.span
                         aria-hidden="true"
-                        animate={{ rotate: 360 }}
-                        transition={{ duration: 10, repeat: Infinity, ease: 'linear' }}
-                        className="absolute w-24 h-24 rounded-full border-2 border-dashed"
-                        style={{ borderColor: `${milestoneGold}aa` }}
+                        animate={{ scale: [0.8, 1.85], opacity: [0.65, 0] }}
+                        transition={{ duration: 1.8, repeat: Infinity, ease: 'easeOut' }}
+                        className="absolute w-16 h-16 rounded-full border-2"
+                        style={{ borderColor: badgeColor }}
                       />
-                    )}
-
-                    {/* Orbiting sparkles for 1st win */}
-                    {activeMilestone === 1 && (
-                      <motion.div
+                      <motion.span
                         aria-hidden="true"
-                        animate={{ rotate: 360 }}
-                        transition={{ duration: 8, repeat: Infinity, ease: 'linear' }}
-                        className="absolute w-24 h-24"
-                      >
-                        {[0, 1, 2, 3, 4, 5].map((idx) => {
-                          const rad = (idx / 6) * Math.PI * 2;
-                          return (
-                            <span
-                              key={idx}
-                              className="absolute w-2 h-2 rounded-full"
-                              style={{
-                                left: `calc(50% + ${Math.cos(rad) * 42}px - 4px)`,
-                                top: `calc(50% + ${Math.sin(rad) * 42}px - 4px)`,
-                                backgroundColor: idx % 2 === 0 ? activeTheme.accent : '#ffffff',
-                              }}
-                            />
-                          );
-                        })}
-                      </motion.div>
-                    )}
+                        animate={{ scale: [0.8, 2.2], opacity: [0.45, 0] }}
+                        transition={{ duration: 1.8, delay: 0.6, repeat: Infinity, ease: 'easeOut' }}
+                        className="absolute w-16 h-16 rounded-full border"
+                        style={{ borderColor: activeTheme.accent }}
+                      />
+                    </>
+                  )}
 
-                    {/* Main center icon badge */}
+                  {/* Rotating outer crest ring for 10th win */}
+                  {activeMilestone === 10 && (
                     <motion.div
-                      initial={{ scale: 0, rotate: -25 }}
-                      animate={{
-                        scale: [1, 1.08, 1],
-                        rotate: activeMilestone === 10 ? [0, -4, 4, 0] : [0, -3, 3, 0],
-                        y: [0, -4, 0],
-                      }}
-                      transition={{
-                        scale: { duration: 2.2, repeat: Infinity, ease: 'easeInOut' },
-                        rotate: { duration: 3, repeat: Infinity, ease: 'easeInOut' },
-                        y: { duration: 2.4, repeat: Infinity, ease: 'easeInOut' },
-                      }}
-                      className="relative w-16 h-16 rounded-2xl flex items-center justify-center border-2 shadow-xl"
-                      style={{
-                        backgroundColor: `${badgeColor}22`,
-                        borderColor: badgeColor,
-                        color: badgeColor,
-                      }}
+                      aria-hidden="true"
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 10, repeat: Infinity, ease: 'linear' }}
+                      className="absolute w-24 h-24 rounded-full border-2 border-dashed"
+                      style={{ borderColor: `${milestoneGold}aa` }}
+                    />
+                  )}
+
+                  {/* Orbiting sparkles for standard wins and 1st win */}
+                  {(activeMilestone === 1 || !activeMilestone) && (
+                    <motion.div
+                      aria-hidden="true"
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 8, repeat: Infinity, ease: 'linear' }}
+                      className="absolute w-24 h-24"
                     >
-                      {activeMilestone === 10 ? (
-                        <Crown className="w-9 h-9" strokeWidth={2.2} />
-                      ) : activeMilestone === 5 ? (
-                        <Flame className="w-9 h-9" strokeWidth={2.2} />
-                      ) : activeMilestone === 1 ? (
-                        <Sparkles className="w-9 h-9" strokeWidth={2.2} />
-                      ) : (
-                        <Trophy className="w-8 h-8" strokeWidth={2.2} />
-                      )}
+                      {[0, 1, 2, 3, 4, 5].map((idx) => {
+                        const rad = (idx / 6) * Math.PI * 2;
+                        return (
+                          <span
+                            key={idx}
+                            className="absolute w-2 h-2 rounded-full"
+                            style={{
+                              left: `calc(50% + ${Math.cos(rad) * 42}px - 4px)`,
+                              top: `calc(50% + ${Math.sin(rad) * 42}px - 4px)`,
+                              backgroundColor: idx % 2 === 0 ? activeTheme.accent : '#ffffff',
+                            }}
+                          />
+                        );
+                      })}
                     </motion.div>
-                  </div>
-                )}
+                  )}
+
+                  {/* Main center icon badge */}
+                  <motion.div
+                    initial={{ scale: 0, rotate: -25 }}
+                    animate={{
+                      scale: [1, 1.08, 1],
+                      rotate: activeMilestone === 10 ? [0, -4, 4, 0] : [0, -3, 3, 0],
+                      y: [0, -4, 0],
+                    }}
+                    transition={{
+                      scale: { duration: 2.2, repeat: Infinity, ease: 'easeInOut' },
+                      rotate: { duration: 3, repeat: Infinity, ease: 'easeInOut' },
+                      y: { duration: 2.4, repeat: Infinity, ease: 'easeInOut' },
+                    }}
+                    className="relative w-16 h-16 rounded-2xl flex items-center justify-center border-2 shadow-xl"
+                    style={{
+                      backgroundColor: `${badgeColor}22`,
+                      borderColor: badgeColor,
+                      color: badgeColor,
+                    }}
+                  >
+                    {activeMilestone === 10 ? (
+                      <Crown className="w-9 h-9" strokeWidth={2.2} />
+                    ) : activeMilestone === 5 ? (
+                      <Flame className="w-9 h-9" strokeWidth={2.2} />
+                    ) : activeMilestone === 1 ? (
+                      <Sparkles className="w-9 h-9" strokeWidth={2.2} />
+                    ) : (
+                      <Trophy className="w-8 h-8" strokeWidth={2.2} />
+                    )}
+                  </motion.div>
+                </div>
 
                 {/* 5th win: 5 popping stars */}
                 {activeMilestone === 5 && (
@@ -3360,8 +4034,8 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Milestone callout heading */}
-                {activeMilestone && (
+                {/* Milestone or Round Winner callout heading */}
+                {activeMilestone ? (
                   <motion.div
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -3383,6 +4057,24 @@ export default function App() {
                           : '10 Wins · Grand Legend'}
                     </span>
                   </motion.div>
+                ) : (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.14 }}
+                    className="mb-2"
+                  >
+                    <span
+                      className="inline-block text-[11px] font-extrabold tracking-[0.2em] uppercase px-3 py-1 rounded-full border"
+                      style={{
+                        color: badgeColor,
+                        borderColor: `${badgeColor}55`,
+                        backgroundColor: `${badgeColor}18`,
+                      }}
+                    >
+                      {isSelfWin ? 'Victory!' : 'Round Winner'}
+                    </span>
+                  </motion.div>
                 )}
 
                 <motion.h2
@@ -3397,12 +4089,12 @@ export default function App() {
                         ? milestoneGold
                         : activeTheme.accent
                       : '#f4f4ed',
-                    textShadow: isSelfWin ? `0 0 28px ${badgeColor}55` : undefined,
+                    textShadow: `0 0 28px ${badgeColor}66`,
                   }}
                 >
                   {isSelfWin
                     ? 'YOU WIN!'
-                    : `${(activeView.winnerName ?? activeView.opponentName).toUpperCase()} WINS`}
+                    : `${(activeView.winnerName ?? activeView.opponentName).toUpperCase()} WINS!`}
                 </motion.h2>
 
                 {activeMilestone && (
@@ -3470,20 +4162,14 @@ export default function App() {
                   <motion.button
                     whileHover={{ scale: 1.04 }}
                     whileTap={{ scale: 0.96 }}
-                    animate={
-                      isSelfWin
-                        ? {
-                            boxShadow: [
-                              `0 0 0px ${badgeColor}00`,
-                              `0 0 22px ${badgeColor}66`,
-                              `0 0 0px ${badgeColor}00`,
-                            ],
-                          }
-                        : undefined
-                    }
-                    transition={
-                      isSelfWin ? { duration: 2, repeat: Infinity, ease: 'easeInOut' } : undefined
-                    }
+                    animate={{
+                      boxShadow: [
+                        `0 0 0px ${badgeColor}00`,
+                        `0 0 22px ${badgeColor}66`,
+                        `0 0 0px ${badgeColor}00`,
+                      ],
+                    }}
+                    transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
                     type="button"
                     onClick={handleRestartRound}
                     className="flex-1 h-12 px-5 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"

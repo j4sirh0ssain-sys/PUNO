@@ -1,6 +1,7 @@
-import { canPlayCard } from './engine.ts';
+import { canPlayCard, getHandLimit } from './engine.ts';
 import { TABLE_THEMES, type TableTheme, type TableThemeId } from './themes.ts';
 import {
+  BOMBOCLATT_CARD_VALUES,
   COLORS,
   PALETTE,
   type Card,
@@ -189,6 +190,22 @@ type Particle =
       vr: number;
       w: number;
       h: number;
+      color: string;
+    }
+  | {
+      kind: 'feather';
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      life: number;
+      max: number;
+      g: number;
+      rot: number;
+      vr: number;
+      swayPh: number;
+      swayAmp: number;
+      size: number;
       color: string;
     };
 
@@ -824,6 +841,9 @@ export class PunoCanvasEngine {
         this.addBanner('7 POWER CARDS!', this.theme.accent, 0.65, 1.9, -75, 0.15);
         this.spawnBurst(this.cx, this.cy, this.theme.accent, 34, 320);
         this.spawnRing(this.cx, this.cy, this.theme.accent, 40, 260, 0.8, 5);
+      } else if (eff.difficulty === 'bomboclatt') {
+        this.addBanner('BOMBOCLATT!', '#d946ef', 0.72, 1.35, -20, 0.45);
+        this.spawnRing(this.cx, this.cy, '#d946ef', 32, 240, 0.75, 4.5);
       } else if (eff.difficulty === 'no_mercy') {
         this.addBanner('NO MERCY!', '#f43f5e', 0.68, 1.15, -20, 0.5);
         this.spawnRing(this.cx, this.cy, '#f43f5e', 30, 220, 0.7, 4);
@@ -893,7 +913,8 @@ export class PunoCanvasEngine {
     }
 
     if (eff.kind === 'mercy_ko') {
-      const text = eff.isSelfLoser ? 'MERCY KO · 25+ CARDS' : `${eff.loserName.toUpperCase()} KO!`;
+      const limit = getHandLimit(this.view?.difficulty ?? 'no_mercy') ?? 25;
+      const text = eff.isSelfLoser ? `MERCY KO · ${limit}+ CARDS` : `${eff.loserName.toUpperCase()} KO!`;
       this.addBanner(text, '#f43f5e', 0.85, 1.7, -75, 0);
       if (!this.reducedMotion) {
         this.shake = Math.max(this.shake, 16);
@@ -910,12 +931,126 @@ export class PunoCanvasEngine {
       return;
     }
 
+    if (eff.kind === 'crow_feathers') {
+      this.spawnCrowFeathers(36);
+      this.addBanner('KAAAW! RAFATH KAUWA', '#e2e8f0', 0.74, 1.6, -78, 0.05);
+      if (!this.reducedMotion) {
+        this.tableFlash = 0.26;
+        this.tableFlashColor = '#334155';
+      }
+      this.spawnRing(px, py, '#94a3b8', 22, 230, 0.75, 4);
+      if (typeof eff.targetIndex === 'number') {
+        const [tx, ty] = this.getSeatPos(eff.targetIndex);
+        this.spawnBurst(tx, ty, '#94a3b8', 20, 210);
+        this.spawnRing(tx, ty, '#ef4444', 16, 125, 0.65, 3);
+      }
+      return;
+    }
+
+    if (eff.kind === 'rizz_line') {
+      const col = eff.accepted === false ? '#94a3b8' : '#f472b6';
+      const label =
+        eff.accepted === true
+          ? 'RIZZ! +1 CARD'
+          : eff.accepted === false
+            ? 'CURVED!'
+            : 'RIZZLER ARVIN!';
+      this.addBanner(label, col, 0.82, 1.4, -75, 0.05);
+      if (!this.reducedMotion) {
+        this.tableFlash = 0.24;
+        this.tableFlashColor = col;
+      }
+      this.spawnBurst(px, py, col, 32, 300);
+      this.spawnRing(px, py, col, 20, 220, 0.75, 4);
+      if (
+        eff.accepted === true &&
+        typeof eff.targetIndex === 'number' &&
+        typeof eff.seatIndex === 'number'
+      ) {
+        const [vx, vy] = this.getSeatPos(eff.targetIndex);
+        const [tx, ty] = this.getSeatPos(eff.seatIndex);
+        this.spawnTransientFlight(null, vx, vy, tx, ty, 0.44, 0.44, 0.05, false, '#f472b6', true);
+      } else if (typeof eff.targetIndex === 'number') {
+        const [tx, ty] = this.getSeatPos(eff.targetIndex);
+        this.spawnBurst(tx, ty, col, 24, 240);
+        this.spawnRing(tx, ty, col, 18, 130, 0.65, 3.5);
+      }
+      return;
+    }
+
+    if (eff.kind === 'surjo_ko') {
+      const label = eff.isSelfLoser
+        ? 'GOONER SURJO KO!'
+        : `${eff.targetName.toUpperCase()} ELIMINATED!`;
+      this.addBanner(label, '#38bdf8', 0.88, 1.8, -75, 0);
+      if (!this.reducedMotion) {
+        this.shake = Math.max(this.shake, 18);
+        this.tableFlash = 0.56;
+        this.tableFlashColor = '#38bdf8';
+      }
+      this.spawnBurst(this.cx, this.cy, '#38bdf8', 46, 380);
+      this.spawnBurst(this.cx, this.cy, '#ffffff', 30, 320);
+      this.spawnRing(this.cx, this.cy, '#ffffff', 28, 340, 0.9, 6);
+      if (typeof eff.targetIndex === 'number') {
+        const [kx, ky] = this.getSeatPos(eff.targetIndex);
+        this.spawnBurst(kx, ky, '#38bdf8', 36, 320);
+        this.spawnBurst(kx, ky, '#ffffff', 24, 260);
+        this.spawnRing(kx, ky, '#ffffff', 20, 175, 0.85, 5);
+      }
+      return;
+    }
+
+    if (eff.kind === 'steal_power') {
+      const label = eff.stolenCard
+        ? `STOLEN: ${eff.stolenCard.value.toUpperCase()}!`
+        : 'TOOTHPICK ALIF!';
+      this.addBanner(label, '#fbbf24', 0.78, 1.5, -75, 0.05);
+      if (!this.reducedMotion) {
+        this.tableFlash = 0.28;
+        this.tableFlashColor = '#fbbf24';
+      }
+      this.spawnBurst(px, py, '#fbbf24', 30, 300);
+      this.spawnRing(px, py, '#fbbf24', 20, 220, 0.72, 4);
+      if (typeof eff.victimIndex === 'number' && typeof eff.thiefIndex === 'number') {
+        const [vx, vy] = this.getSeatPos(eff.victimIndex);
+        const [tx, ty] = this.getSeatPos(eff.thiefIndex);
+        this.spawnBurst(vx, vy, '#fbbf24', 22, 220);
+        this.spawnTransientFlight(
+          eff.stolenCard ?? null,
+          vx,
+          vy,
+          tx,
+          ty,
+          0.46,
+          0.5,
+          0.05,
+          Boolean(eff.stolenCard),
+          '#fbbf24',
+          true
+        );
+      }
+      return;
+    }
+
     if (eff.kind === 'win') {
       const m = eff.milestone ?? null;
       this.winMilestone = m;
-      this.winBurstCooldown = 0.9;
+      this.winBurstCooldown = 0.85;
       const accent = this.theme.accent;
       const suitCols = COLORS.map((c) => this.theme.suitHex[c]);
+      const isWinnerSelf = !this.view || eff.winnerRole === this.view.selfRole;
+      const winnerLabel = isWinnerSelf
+        ? 'YOU WIN!'
+        : `${(eff.winnerName || 'WINNER').toUpperCase()} WINS!`;
+
+      this.addBanner(winnerLabel, accent, 1.35, 1.85, -34);
+
+      if (typeof eff.winnerIndex === 'number') {
+        const [wx, wy] = this.getSeatPos(eff.winnerIndex);
+        this.spawnBurst(wx, wy, accent, 38, 340, 220);
+        this.spawnRing(wx, wy, accent, 16, 175, 0.75, 4.5);
+        this.spawnRing(wx, wy, '#ffffff', 10, 120, 0.55, 3);
+      }
 
       if (m === 10) {
         this.spawnConfetti(110);
@@ -931,6 +1066,7 @@ export class PunoCanvasEngine {
           const ang = (k / 10) * Math.PI * 2;
           const dist = Math.min(this.width, this.height) * 0.28;
           setTimeout(() => {
+            if (this.view?.turn !== 'over') return;
             this.spawnBurst(
               this.cx + Math.cos(ang) * dist,
               this.cy + Math.sin(ang) * dist * 0.72,
@@ -963,6 +1099,7 @@ export class PunoCanvasEngine {
           const ang = -Math.PI / 2 + (k / 5) * Math.PI * 2;
           const dist = Math.min(this.width, this.height) * 0.25;
           setTimeout(() => {
+            if (this.view?.turn !== 'over') return;
             this.spawnBurst(
               this.cx + Math.cos(ang) * dist,
               this.cy + Math.sin(ang) * dist * 0.78,
@@ -993,6 +1130,7 @@ export class PunoCanvasEngine {
         this.spawnBurst(this.cx, this.cy, accent, 40, 350, 240);
         for (let k = 0; k < 7; k++) {
           setTimeout(() => {
+            if (this.view?.turn !== 'over') return;
             this.spawnBurst(
               140 + Math.random() * (this.width - 280),
               110 + Math.random() * (this.height * 0.45),
@@ -1003,18 +1141,24 @@ export class PunoCanvasEngine {
           }, k * 120);
         }
       } else {
-        this.spawnConfetti(75);
-        this.spawnRing(this.cx, this.cy, accent, 25, 240, 0.75, 4.5);
-        for (let k = 0; k < 5; k++) {
+        this.spawnConfetti(85);
+        if (!this.reducedMotion) {
+          this.shake = Math.max(this.shake, 5.5);
+          this.tableFlash = 0.32;
+          this.tableFlashColor = accent;
+        }
+        this.spawnRing(this.cx, this.cy, accent, 25, 280, 0.85, 5);
+        this.spawnRing(this.cx, this.cy, '#ffffff', 14, 210, 0.7, 3.2);
+        this.spawnBurst(this.cx, this.cy, accent, 38, 340, 230);
+        for (let k = 0; k < 6; k++) {
           setTimeout(() => {
-            this.spawnBurst(
-              120 + Math.random() * (this.width - 240),
-              100 + Math.random() * (this.height * 0.45),
-              suitCols[Math.floor(Math.random() * 4)],
-              38,
-              360
-            );
-          }, k * 130);
+            if (this.view?.turn !== 'over') return;
+            const bx = 120 + Math.random() * Math.max(120, this.width - 240);
+            const by = 100 + Math.random() * Math.max(120, this.height * 0.45);
+            const col = suitCols[Math.floor(Math.random() * 4)];
+            this.spawnBurst(bx, by, col, 38, 360);
+            this.spawnRing(bx, by, '#ffffff', 10, 105, 0.52, 2.8);
+          }, k * 120);
         }
       }
       return;
@@ -1234,6 +1378,30 @@ export class PunoCanvasEngine {
     }
   }
 
+  private spawnCrowFeathers(n = 36): void {
+    const count = this.reducedMotion ? 8 : n;
+    const featherColors = ['#0f172a', '#1e293b', '#334155', '#090d16'];
+    for (let i = 0; i < count; i++) {
+      const life = 2.5 + Math.random() * 1.8;
+      this.addParticle({
+        kind: 'feather',
+        x: Math.random() * this.width,
+        y: -25 - Math.random() * 120,
+        vx: (Math.random() - 0.5) * 75,
+        vy: 68 + Math.random() * 75,
+        life,
+        max: life,
+        g: 10,
+        rot: Math.random() * Math.PI * 2,
+        vr: (Math.random() - 0.5) * 4.5,
+        swayPh: Math.random() * Math.PI * 2,
+        swayAmp: 34 + Math.random() * 44,
+        size: 11 + Math.random() * 10,
+        color: featherColors[Math.floor(Math.random() * featherColors.length)],
+      });
+    }
+  }
+
   private layoutSprites(): void {
     if (!this.view) return;
     const isMyTurn = this.view.turn === this.view.selfRole;
@@ -1423,8 +1591,11 @@ export class PunoCanvasEngine {
         p.vx *= drag;
         if (p.kind === 'conf') {
           p.rot += p.vr * dt;
+        } else if (p.kind === 'feather') {
+          p.x += Math.sin(this.t * 3.4 + p.swayPh) * p.swayAmp * dt;
+          p.rot += p.vr * dt + Math.cos(this.t * 3.4 + p.swayPh) * 0.7 * dt;
         }
-        if (p.y > this.height + 30) continue;
+        if (p.y > this.height + 40) continue;
       }
       nextParticles.push(p);
     }
@@ -1441,22 +1612,22 @@ export class PunoCanvasEngine {
     this.shake = Math.max(0, this.shake - dt * 30);
     this.tableFlash = Math.max(0, this.tableFlash - dt * 1.1);
 
-    if (this.view?.winner && this.view.winner === this.view.selfRole) {
-      const confChance = this.winMilestone === 10 ? 0.85 : this.winMilestone === 5 ? 0.7 : 0.5;
+    if (this.view?.turn === 'over' && this.view.winner) {
+      const confChance = this.winMilestone === 10 ? 0.85 : this.winMilestone === 5 ? 0.7 : 0.55;
       if (Math.random() < confChance) {
         this.spawnConfetti(this.winMilestone === 10 ? 2 : 1);
       }
       if (!this.reducedMotion) {
         this.winBurstCooldown -= dt;
         if (this.winBurstCooldown <= 0) {
-          this.winBurstCooldown = this.winMilestone === 10 ? 0.55 : this.winMilestone === 5 ? 0.8 : 1.25;
+          this.winBurstCooldown = this.winMilestone === 10 ? 0.55 : this.winMilestone === 5 ? 0.8 : 1.15;
           const bx = 100 + Math.random() * Math.max(120, this.width - 200);
           const by = 80 + Math.random() * Math.max(100, this.height * 0.5);
           const col =
             Math.random() < 0.45
               ? this.theme.accent
               : this.theme.suitHex[COLORS[Math.floor(Math.random() * 4)]];
-          this.spawnBurst(bx, by, col, this.winMilestone ? 30 : 22, 290, 260);
+          this.spawnBurst(bx, by, col, this.winMilestone ? 30 : 24, 290, 260);
           this.spawnRing(bx, by, col, 10, 95, 0.55, 2.5);
         }
       }
@@ -1500,9 +1671,9 @@ export class PunoCanvasEngine {
     ctx.fillStyle = spot;
     ctx.fillRect(0, 0, this.width, this.height);
 
-    if (this.view?.winner && this.view.winner === this.view.selfRole && !this.reducedMotion) {
+    if (this.view?.turn === 'over' && this.view.winner && !this.reducedMotion) {
       const rayCount = this.winMilestone === 10 ? 14 : this.winMilestone === 5 ? 10 : 8;
-      const rayAlpha = this.winMilestone === 10 ? 0.13 : this.winMilestone ? 0.09 : 0.05;
+      const rayAlpha = this.winMilestone === 10 ? 0.13 : this.winMilestone ? 0.09 : 0.065;
       const maxR = Math.max(this.width, this.height) * 0.85;
       ctx.save();
       ctx.translate(this.cx, this.height * 0.45);
@@ -2143,9 +2314,12 @@ export class PunoCanvasEngine {
       return;
     }
 
+    const isBomboclattCard = (BOMBOCLATT_CARD_VALUES as readonly string[]).includes(card.value);
     const base = th.suitHex[card.color];
 
-    if (design === 'obsidian') {
+    if (isBomboclattCard) {
+      this.drawBomboclattCardInterior(ctx, card, fx, tone);
+    } else if (design === 'obsidian') {
       // Cyber Eclipse: matte dark body, glowing suit frame, diagonal tech corners (TR/BL), hex crest
       ctx.fillStyle = tone('#0d131d');
       this.roundRectPath(ctx, -35, -52, 70, 104, 6);
@@ -2548,7 +2722,16 @@ export class PunoCanvasEngine {
       : tone(base);
 
     let corner = card.value;
-    if (card.color === 'Wild') {
+    if (isBomboclattCard) {
+      corner =
+        card.value === 'Rizzler Arvin'
+          ? 'RIZZ'
+          : card.value === 'Rafath Kauwa'
+            ? 'KAUWA'
+            : card.value === 'Gooner Surjo'
+              ? 'SURJO'
+              : 'ALIF';
+    } else if (card.color === 'Wild') {
       if (card.value === '+10') {
         corner = '+10';
         if (fx >= 0.35) {
@@ -2715,7 +2898,7 @@ export class PunoCanvasEngine {
       drawOpticalText(card.value, 0, 0, symbolColor, tone('rgba(0,0,0,0.35)'), 1.8, 2.2);
     }
 
-    if (fx >= 0.35) {
+    if (fx >= 0.35 && !isBomboclattCard) {
       const isThreeChar = corner.length >= 3;
       const isTwoChar = corner.length === 2;
       const cornerFontPx = isThreeChar ? 9.5 : isTwoChar ? 11.5 : 13;
@@ -2750,6 +2933,304 @@ export class PunoCanvasEngine {
         ctx.fillStyle = grad;
         ctx.fillRect(-40, -57, 80, 114);
         ctx.restore();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  private drawBomboclattCardInterior(
+    ctx: CanvasRenderingContext2D,
+    card: Card,
+    fx: number,
+    tone: (col: string) => string
+  ): void {
+    ctx.save();
+    this.roundRectPath(ctx, -35, -52, 70, 104, 6);
+    ctx.clip();
+
+    if (card.value === 'Rizzler Arvin') {
+      // Crimson/pink pixel mirror-selfie card with pixel hearts & LOVE meter
+      const g = ctx.createLinearGradient(0, -52, 0, 52);
+      g.addColorStop(0, tone('#fb7185'));
+      g.addColorStop(0.5, tone('#e11d48'));
+      g.addColorStop(1, tone('#881337'));
+      ctx.fillStyle = g;
+      ctx.fillRect(-35, -52, 70, 104);
+
+      ctx.strokeStyle = tone('#fecdd3');
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-32, -49, 64, 98);
+
+      // Pixel hearts in corners
+      const drawHeart = (hx: number, hy: number, sc: number, col: string) => {
+        ctx.fillStyle = tone(col);
+        ctx.beginPath();
+        ctx.arc(hx - 2.2 * sc, hy - 1.2 * sc, 2.4 * sc, 0, Math.PI * 2);
+        ctx.arc(hx + 2.2 * sc, hy - 1.2 * sc, 2.4 * sc, 0, Math.PI * 2);
+        ctx.lineTo(hx, hy + 4.2 * sc);
+        ctx.closePath();
+        ctx.fill();
+      };
+      drawHeart(-24, -40, 1.35, '#fff1f2');
+      drawHeart(24, -40, 1.1, '#fda4af');
+      drawHeart(-24, 24, 1.1, '#fda4af');
+      drawHeart(24, 24, 1.35, '#fff1f2');
+
+      // Mirror selfie inner frame
+      ctx.fillStyle = tone('#4c0519');
+      ctx.strokeStyle = tone('#fda4af');
+      ctx.lineWidth = 1.6;
+      this.roundRectPath(ctx, -20, -28, 40, 56, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      // Portrait silhouette
+      ctx.fillStyle = tone('#1e1b2e'); // jacket
+      this.roundRectPath(ctx, -14, 6, 28, 22, 6);
+      ctx.fill();
+      ctx.fillStyle = tone('#fed7aa'); // face
+      ctx.beginPath();
+      ctx.arc(0, -8, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = tone('#171717'); // hair
+      ctx.beginPath();
+      ctx.arc(0, -13, 10.2, Math.PI, 0);
+      ctx.fill();
+      // Sunglasses & smirk
+      ctx.fillStyle = tone('#09090b');
+      ctx.fillRect(-7.5, -10.5, 6, 3.8);
+      ctx.fillRect(1.5, -10.5, 6, 3.8);
+      ctx.fillRect(-1.5, -9.5, 3, 1.2);
+      // Smartphone held up
+      ctx.fillStyle = tone('#e2e8f0');
+      this.roundRectPath(ctx, 5, -3, 10, 16, 2);
+      ctx.fill();
+      ctx.fillStyle = tone('#f43f5e');
+      ctx.fillRect(7, -1, 6, 10);
+
+      if (fx >= 0.35) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = tone('#fff1f2');
+        ctx.font = '800 6.5px "Outfit", sans-serif';
+        ctx.fillText('LOVE ♥♥♥♡', 0, -40);
+        ctx.fillStyle = tone('#4c0519');
+        ctx.fillRect(-35, 34, 70, 18);
+        ctx.fillStyle = tone('#fecdd3');
+        ctx.font = '800 7px "Outfit", sans-serif';
+        ctx.fillText('RIZZLER ARVIN', 0, 43);
+      }
+    } else if (card.value === 'Rafath Kauwa') {
+      // Dark charcoal/slate card with crows & glowing red eyes
+      const g = ctx.createLinearGradient(0, -52, 0, 52);
+      g.addColorStop(0, tone('#272c35'));
+      g.addColorStop(1, tone('#0f131a'));
+      ctx.fillStyle = g;
+      ctx.fillRect(-35, -52, 70, 104);
+
+      ctx.strokeStyle = tone('#e2e8f0');
+      ctx.lineWidth = 1.8;
+      ctx.strokeRect(-32, -49, 64, 98);
+
+      // Falling mini feathers background
+      ctx.fillStyle = tone('#090d14');
+      for (const [fxp, fyp, rot] of [
+        [-22, -33, -0.4],
+        [23, -30, 0.5],
+        [-24, 14, 0.3],
+        [23, 10, -0.5],
+      ]) {
+        ctx.save();
+        ctx.translate(fxp, fyp);
+        ctx.rotate(rot);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 2.2, 6, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Striped torso
+      ctx.fillStyle = tone('#e2e8f0');
+      this.roundRectPath(ctx, -18, 6, 36, 26, 6);
+      ctx.fill();
+      ctx.fillStyle = tone('#1e293b');
+      for (let sy = 9; sy < 30; sy += 6) {
+        ctx.fillRect(-18, sy, 36, 3);
+      }
+
+      // Perched crows on shoulders
+      ctx.fillStyle = tone('#020617');
+      for (const sx of [-19, 19]) {
+        ctx.beginPath();
+        ctx.ellipse(sx, 4, 5.5, 7, sx < 0 ? -0.2 : 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(sx, -3, 3.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Face & dark hair
+      ctx.fillStyle = tone('#e5c7b2');
+      ctx.beginPath();
+      ctx.arc(0, -10, 11, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = tone('#090d16');
+      ctx.beginPath();
+      ctx.arc(0, -15, 11.5, Math.PI, 0);
+      ctx.fill();
+
+      // Glowing red eyes
+      ctx.fillStyle = tone('#ef4444');
+      ctx.beginPath();
+      ctx.arc(-4.2, -10, 2.6, 0, Math.PI * 2);
+      ctx.arc(4.2, -10, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = tone('#ffffff');
+      ctx.beginPath();
+      ctx.arc(-4.2, -10, 1, 0, Math.PI * 2);
+      ctx.arc(4.2, -10, 1, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (fx >= 0.35) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = tone('#94a3b8');
+        ctx.font = '800 6.5px "Outfit", sans-serif';
+        ctx.fillText('PEEK 7.5s', 0, -40);
+        ctx.fillStyle = tone('#020617');
+        ctx.fillRect(-35, 34, 70, 18);
+        ctx.fillStyle = tone('#f8fafc');
+        ctx.font = '800 7px "Outfit", sans-serif';
+        ctx.fillText('RAFATH KAUWA', 0, 43);
+      }
+    } else if (card.value === 'Gooner Surjo') {
+      // Bright sky-blue card with white milk-splash frame & carton
+      const g = ctx.createLinearGradient(0, -52, 0, 52);
+      g.addColorStop(0, tone('#38bdf8'));
+      g.addColorStop(1, tone('#0284c7'));
+      ctx.fillStyle = g;
+      ctx.fillRect(-35, -52, 70, 104);
+
+      // Milk splash corner blobs
+      ctx.fillStyle = tone('#f8fafc');
+      for (const [bx, by, r] of [
+        [-28, -46, 8],
+        [28, -44, 7],
+        [-26, 26, 7],
+        [27, 25, 8],
+        [-18, -50, 5],
+        [18, -50, 5],
+      ]) {
+        ctx.beginPath();
+        ctx.arc(bx, by, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.strokeStyle = tone('#ffffff');
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-32, -49, 64, 98);
+
+      // Mini MILK carton badges
+      ctx.fillStyle = tone('#e0f2fe');
+      ctx.strokeStyle = tone('#0369a1');
+      ctx.lineWidth = 1;
+      ctx.fillRect(-28, -32, 9, 13);
+      ctx.strokeRect(-28, -32, 9, 13);
+      ctx.fillRect(19, -32, 9, 13);
+      ctx.strokeRect(19, -32, 9, 13);
+
+      // Character with sunglasses holding milk carton
+      ctx.fillStyle = tone('#0f172a');
+      this.roundRectPath(ctx, -16, 6, 32, 26, 6);
+      ctx.fill();
+      ctx.fillStyle = tone('#fed7aa');
+      ctx.beginPath();
+      ctx.arc(0, -10, 10.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = tone('#1e293b');
+      ctx.beginPath();
+      ctx.arc(0, -15, 10.8, Math.PI, 0);
+      ctx.fill();
+      // Sunglasses
+      ctx.fillStyle = tone('#020617');
+      ctx.fillRect(-8, -12, 7, 4.2);
+      ctx.fillRect(1, -12, 7, 4.2);
+      ctx.fillRect(-1, -11, 2, 1.4);
+
+      // Big white carton in center hand
+      ctx.fillStyle = tone('#ffffff');
+      ctx.strokeStyle = tone('#0284c7');
+      ctx.lineWidth = 1.4;
+      this.roundRectPath(ctx, -8, 1, 16, 21, 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = tone('#0284c7');
+      ctx.fillRect(-6, 7, 12, 5);
+
+      if (fx >= 0.35) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = tone('#0369a1');
+        ctx.font = '800 6.5px "Outfit", sans-serif';
+        ctx.fillText('1× KO CARD', 0, -40);
+        ctx.fillStyle = tone('#0369a1');
+        ctx.fillRect(-35, 34, 70, 18);
+        ctx.fillStyle = tone('#ffffff');
+        ctx.font = '800 7px "Outfit", sans-serif';
+        ctx.fillText('GOONER SURJO', 0, 43);
+      }
+    } else {
+      // Toothpick Alif: dark plum & gold-framed gym barbell card
+      const g = ctx.createLinearGradient(0, -52, 0, 52);
+      g.addColorStop(0, tone('#3b1a33'));
+      g.addColorStop(1, tone('#140814'));
+      ctx.fillStyle = g;
+      ctx.fillRect(-35, -52, 70, 104);
+
+      ctx.strokeStyle = tone('#fbbf24');
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-32, -49, 64, 98);
+
+      // Barbell behind shoulders
+      ctx.fillStyle = tone('#cbd5e1');
+      ctx.fillRect(-30, 5, 60, 3.2);
+      // Heavy plates
+      ctx.fillStyle = tone('#64748b');
+      ctx.strokeStyle = tone('#fbbf24');
+      ctx.lineWidth = 1.2;
+      for (const px of [-28, -24, 21, 25]) {
+        ctx.fillRect(px, -3, 3.5, 19);
+        ctx.strokeRect(px, -3, 3.5, 19);
+      }
+
+      // Lifter in black tank top
+      ctx.fillStyle = tone('#0f172a');
+      this.roundRectPath(ctx, -13, 6, 26, 26, 5);
+      ctx.fill();
+      ctx.fillStyle = tone('#fdba74');
+      ctx.beginPath();
+      ctx.arc(0, -10, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = tone('#171717');
+      ctx.beginPath();
+      ctx.arc(0, -15, 10.4, Math.PI, 0);
+      ctx.fill();
+      // Serious brow
+      ctx.fillStyle = tone('#09090b');
+      ctx.fillRect(-6, -11, 4, 2);
+      ctx.fillRect(2, -11, 4, 2);
+
+      if (fx >= 0.35) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = tone('#fde68a');
+        ctx.font = '800 6.5px "Outfit", sans-serif';
+        ctx.fillText('STEAL POWER', 0, -40);
+        ctx.fillStyle = tone('#451a03');
+        ctx.fillRect(-35, 34, 70, 18);
+        ctx.fillStyle = tone('#fde68a');
+        ctx.font = '800 6.8px "Outfit", sans-serif';
+        ctx.fillText('TOOTHPICK ALIF', 0, 43);
       }
     }
 
@@ -2890,6 +3371,29 @@ export class PunoCanvasEngine {
         ctx.beginPath();
         ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
         ctx.stroke();
+      } else if (p.kind === 'feather') {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.globalAlpha = Math.min(1, f * 2.4);
+        const len = p.size;
+        const wid = p.size * 0.34;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.moveTo(0, -len);
+        ctx.quadraticCurveTo(wid, -len * 0.2, wid * 0.55, len * 0.55);
+        ctx.lineTo(0, len);
+        ctx.lineTo(-wid * 0.55, len * 0.55);
+        ctx.quadraticCurveTo(-wid, -len * 0.2, 0, -len);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(203, 213, 225, 0.35)';
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(0, -len * 0.85);
+        ctx.lineTo(0, len * 1.15);
+        ctx.stroke();
+        ctx.restore();
       } else {
         ctx.save();
         ctx.translate(p.x, p.y);

@@ -1,7 +1,9 @@
 import {
+  BOMBOCLATT_HAND_LIMIT,
   COLORS,
   DRAW_CARD_AMOUNTS,
   MAX_PLAYERS,
+  MERCY_HAND_LIMIT,
   MIN_PLAYERS,
   POWER_CARD_VALUES,
   type Card,
@@ -10,7 +12,23 @@ import {
 } from './types.ts';
 
 export function isDifficultyLevel(value: unknown): value is DifficultyLevel {
-  return value === 'chill' || value === 'normal' || value === 'hard' || value === 'no_mercy';
+  return (
+    value === 'chill' ||
+    value === 'normal' ||
+    value === 'hard' ||
+    value === 'no_mercy' ||
+    value === 'bomboclatt'
+  );
+}
+
+export function isNoMercyRuleset(difficulty: DifficultyLevel): boolean {
+  return difficulty === 'no_mercy' || difficulty === 'bomboclatt';
+}
+
+export function getHandLimit(difficulty: DifficultyLevel): number | null {
+  if (difficulty === 'no_mercy') return MERCY_HAND_LIMIT;
+  if (difficulty === 'bomboclatt') return BOMBOCLATT_HAND_LIMIT;
+  return null;
 }
 
 export function clampPlayerCount(value: unknown): number {
@@ -29,6 +47,7 @@ export function makeDeck(
   playerCount: number = MIN_PLAYERS
 ): Card[] {
   const deckCopies = playerCount >= 7 ? 2 : 1;
+  const noMercyPool = isNoMercyRuleset(difficulty);
   const cards: Card[] = [];
   let uid = 0;
 
@@ -40,7 +59,7 @@ export function makeDeck(
         cards.push({ color, value, uid: uid++ });
         cards.push({ color, value, uid: uid++ });
       }
-      if (difficulty === 'no_mercy') {
+      if (noMercyPool) {
         cards.push({ color, value: 'Skip All', uid: uid++ });
         cards.push({ color, value: 'Skip All', uid: uid++ });
         cards.push({ color, value: 'Dump', uid: uid++ });
@@ -53,13 +72,23 @@ export function makeDeck(
         cards.push({ color: 'Wild', value, uid: uid++ });
       }
     }
-    if (difficulty === 'no_mercy') {
+    if (noMercyPool) {
       for (let i = 0; i < 4; i++) {
         cards.push({ color: 'Wild', value: '+6', uid: uid++ });
         cards.push({ color: 'Wild', value: 'Roulette', uid: uid++ });
       }
       for (let i = 0; i < 2; i++) {
         cards.push({ color: 'Wild', value: '+10', uid: uid++ });
+      }
+    }
+    if (difficulty === 'bomboclatt') {
+      for (let i = 0; i < 2; i++) {
+        cards.push({ color: 'Wild', value: 'Rizzler Arvin', uid: uid++ });
+        cards.push({ color: 'Wild', value: 'Rafath Kauwa', uid: uid++ });
+        cards.push({ color: 'Wild', value: 'Toothpick Alif', uid: uid++ });
+      }
+      if (copy === 0) {
+        cards.push({ color: 'Wild', value: 'Gooner Surjo', uid: uid++ });
       }
     }
   }
@@ -118,7 +147,7 @@ export function dealRoundMulti(
     if (name.trim().toLowerCase() === 'j4s1r') {
       jasirSeatIndexes.push(idx);
       for (let i = deck.length - 1; i >= 0 && hands[idx].length < 7; i--) {
-        if (POWER_CARD_VALUES.has(deck[i].value)) {
+        if (POWER_CARD_VALUES.has(deck[i].value) && deck[i].value !== 'Gooner Surjo') {
           const [powerCard] = deck.splice(i, 1);
           hands[idx].push(powerCard);
         }
@@ -279,6 +308,14 @@ export function chooseCpuCard(
     let score = 0;
     if (c.value === 'Dump' && isSuitColor(c.color)) {
       score += colorCounts[c.color] * 7;
+    } else if (c.value === 'Gooner Surjo') {
+      score += 34;
+    } else if (c.value === 'Toothpick Alif') {
+      score += 27;
+    } else if (c.value === 'Rizzler Arvin') {
+      score += 24;
+    } else if (c.value === 'Rafath Kauwa') {
+      score += 20;
     } else if (c.value === '+10') {
       score += urgentOpponent ? 32 : 20;
     } else if (c.value === '+6') {

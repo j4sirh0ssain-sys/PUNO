@@ -212,6 +212,124 @@ class SoundEffects {
       osc.stop(now + 0.25);
     });
   }
+
+  public playCrow(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    // Two raspy crow caws: "KAAAW! KAAAW!"
+    const cawTimes = [0, 0.27];
+    cawTimes.forEach((offset, idx) => {
+      const now = ctx.currentTime + offset;
+      const dur = idx === 0 ? 0.2 : 0.24;
+
+      // Vocal reed sawtooth dropping in pitch
+      const osc = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(idx === 0 ? 640 : 600, now);
+      osc.frequency.exponentialRampToValueAtTime(380, now + dur);
+
+      osc2.type = 'square';
+      osc2.frequency.setValueAtTime(idx === 0 ? 1290 : 1210, now);
+      osc2.frequency.exponentialRampToValueAtTime(740, now + dur);
+
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(1150, now);
+      filter.Q.setValueAtTime(2.6, now);
+
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.11, now + 0.025);
+      gain.gain.setValueAtTime(0.095, now + dur * 0.65);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+      osc.connect(filter);
+      osc2.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now);
+      osc2.start(now);
+      osc.stop(now + dur + 0.02);
+      osc2.stop(now + dur + 0.02);
+
+      // Raspy breath noise layer
+      const bufSize = Math.floor(ctx.sampleRate * dur);
+      const buffer = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = buffer;
+      const nFilter = ctx.createBiquadFilter();
+      nFilter.type = 'bandpass';
+      nFilter.frequency.setValueAtTime(1600, now);
+      nFilter.Q.setValueAtTime(3.2, now);
+      const nGain = ctx.createGain();
+      nGain.gain.setValueAtTime(0.055, now);
+      nGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+      noise.connect(nFilter);
+      nFilter.connect(nGain);
+      nGain.connect(ctx.destination);
+      noise.start(now);
+    });
+  }
+
+  public playRizz(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
+      const now = ctx.currentTime + i * 0.065;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0.075, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.24);
+    });
+  }
+
+  public playSteal(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(320, now);
+    osc.frequency.exponentialRampToValueAtTime(920, now + 0.16);
+    gain.gain.setValueAtTime(0.09, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  }
+
+  public playEliminate(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const sub = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    sub.type = 'sawtooth';
+    sub.frequency.setValueAtTime(190, now);
+    sub.frequency.exponentialRampToValueAtTime(48, now + 0.34);
+    subGain.gain.setValueAtTime(0.12, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+    sub.connect(subGain);
+    subGain.connect(ctx.destination);
+    sub.start(now);
+    sub.stop(now + 0.38);
+  }
 }
 
 export const soundFx = new SoundEffects();

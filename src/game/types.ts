@@ -5,7 +5,7 @@ export type CardColor = SuitColor | 'Wild';
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 10;
 
-export type DifficultyLevel = 'chill' | 'normal' | 'hard' | 'no_mercy';
+export type DifficultyLevel = 'chill' | 'normal' | 'hard' | 'no_mercy' | 'bomboclatt';
 
 export interface DifficultyInfo {
   id: DifficultyLevel;
@@ -13,7 +13,7 @@ export interface DifficultyInfo {
   tier: string;
   summary: string;
   accent: string;
-  level: 1 | 2 | 3 | 4;
+  level: 1 | 2 | 3 | 4 | 5;
 }
 
 export const DIFFICULTY_LIST: DifficultyInfo[] = [
@@ -49,7 +49,28 @@ export const DIFFICULTY_LIST: DifficultyInfo[] = [
     accent: '#f43f5e',
     level: 4,
   },
+  {
+    id: 'bomboclatt',
+    label: 'Bomboclatt',
+    tier: 'Chaotic',
+    summary: 'All No Mercy cards + Rizzler Arvin, Rafath Kauwa, Gooner Surjo & Toothpick Alif · 50-card KO limit',
+    accent: '#d946ef',
+    level: 5,
+  },
 ];
+
+export const BOMBOCLATT_CARD_VALUES = [
+  'Rizzler Arvin',
+  'Rafath Kauwa',
+  'Gooner Surjo',
+  'Toothpick Alif',
+] as const;
+
+export const RIZZ_PICKUP_LINES = [
+  'Did you get hurt bcuz you just fell from heaven',
+  'Are you from tennessee bcuz youre the only 10 I see',
+  'Are a keyboard bcuz youre my type',
+] as const;
 
 export const POWER_CARD_VALUES = new Set([
   'Skip',
@@ -62,6 +83,7 @@ export const POWER_CARD_VALUES = new Set([
   '+6',
   '+10',
   'Roulette',
+  ...BOMBOCLATT_CARD_VALUES,
 ]);
 
 export const DRAW_CARD_AMOUNTS: Record<string, number> = {
@@ -72,6 +94,7 @@ export const DRAW_CARD_AMOUNTS: Record<string, number> = {
 };
 
 export const MERCY_HAND_LIMIT = 25;
+export const BOMBOCLATT_HAND_LIMIT = 50;
 
 export const COLOR_HEX: Record<CardColor, string> = {
   Red: '#ee3f4f',
@@ -119,6 +142,20 @@ export interface SeatInfo {
   kickVotes?: number;
   kickVotesRequired?: number;
   votedToKickBySelf?: boolean;
+}
+
+export interface PendingRizzPrompt {
+  promptId: string;
+  fromIndex: number;
+  fromName: string;
+  line: string;
+}
+
+export interface PeekTargetInfo {
+  targetIndex: number;
+  targetName: string;
+  cards: Card[];
+  expiresAt: number;
 }
 
 export type EffectEvent =
@@ -178,6 +215,38 @@ export type EffectEvent =
       seatIndex?: number;
     }
   | {
+      kind: 'rizz_line';
+      fromName: string;
+      targetName: string;
+      line: string;
+      accepted?: boolean;
+      seatIndex?: number;
+      targetIndex?: number;
+    }
+  | {
+      kind: 'crow_feathers';
+      whoName: string;
+      targetName: string;
+      seatIndex?: number;
+      targetIndex?: number;
+    }
+  | {
+      kind: 'surjo_ko';
+      whoName: string;
+      targetName: string;
+      isSelfLoser: boolean;
+      seatIndex?: number;
+      targetIndex?: number;
+    }
+  | {
+      kind: 'steal_power';
+      thiefName: string;
+      victimName: string;
+      stolenCard?: Card;
+      thiefIndex?: number;
+      victimIndex?: number;
+    }
+  | {
       kind: 'win';
       winnerRole: PlayerRole;
       winnerIndex?: number;
@@ -228,6 +297,8 @@ export interface ClientGameView {
   turnDeadlineAt?: number | null;
   turnDurationMs?: number;
   serverNow?: number;
+  pendingRizzPrompt?: PendingRizzPrompt | null;
+  peekTarget?: PeekTargetInfo | null;
 }
 
 export type ServerWsMessage =
@@ -261,6 +332,11 @@ export type ClientWsAction =
       type: 'play';
       uid: number;
       chosenColor?: SuitColor;
+    }
+  | {
+      type: 'rizz_response';
+      promptId: string;
+      accept: boolean;
     }
   | {
       type: 'draw';
