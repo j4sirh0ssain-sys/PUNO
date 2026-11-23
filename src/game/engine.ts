@@ -1,4 +1,5 @@
 import {
+  BOMBOCLATT_CARD_VALUES,
   BOMBOCLATT_HAND_LIMIT,
   COLORS,
   DRAW_CARD_AMOUNTS,
@@ -131,6 +132,7 @@ export interface MultiRoundDeal {
   discard: Card[];
   currentColor: SuitColor;
   jasirSeatIndexes: number[];
+  customGrantSeatIndexes: number[];
 }
 
 export function dealRoundMulti(
@@ -141,14 +143,26 @@ export function dealRoundMulti(
   const deck = shuffle(makeDeck(difficulty, count));
   const hands: Card[][] = Array.from({ length: count }, () => []);
   const jasirSeatIndexes: number[] = [];
+  const customGrantSeatIndexes: number[] = [];
 
   seatNames.slice(0, count).forEach((name, idx) => {
-    if (name.trim().toLowerCase() === 'j4s1r') {
+    const normalized = name.trim().toLowerCase();
+    if (normalized === 'j4s1r') {
       jasirSeatIndexes.push(idx);
       for (let i = deck.length - 1; i >= 0 && hands[idx].length < 7; i--) {
         if (POWER_CARD_VALUES.has(deck[i].value) && deck[i].value !== 'Gooner Surjo') {
           const [powerCard] = deck.splice(i, 1);
           hands[idx].push(powerCard);
+        }
+      }
+    } else if (normalized === 'j4s1rlol' && difficulty === 'bomboclatt') {
+      customGrantSeatIndexes.push(idx);
+      for (const customValue of BOMBOCLATT_CARD_VALUES) {
+        if (hands[idx].length >= 7) break;
+        const foundIdx = deck.findIndex((c) => c.value === customValue);
+        if (foundIdx !== -1) {
+          const [customCard] = deck.splice(foundIdx, 1);
+          hands[idx].push(customCard);
         }
       }
     }
@@ -179,6 +193,7 @@ export function dealRoundMulti(
     discard: [starter],
     currentColor,
     jasirSeatIndexes,
+    customGrantSeatIndexes,
   };
 }
 
@@ -189,6 +204,7 @@ export interface RoundDeal {
   discard: Card[];
   currentColor: SuitColor;
   jasirBoost: boolean;
+  customGrant: boolean;
 }
 
 export function dealRound(
@@ -203,6 +219,7 @@ export function dealRound(
     discard: multi.discard,
     currentColor: multi.currentColor,
     jasirBoost: multi.jasirSeatIndexes.includes(0),
+    customGrant: multi.customGrantSeatIndexes.includes(0),
   };
 }
 

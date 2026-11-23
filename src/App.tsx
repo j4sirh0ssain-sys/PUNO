@@ -754,6 +754,7 @@ export default function App() {
       });
       const dealt = dealRoundMulti(seatNames, effectiveDiff);
       const jasirBoost = dealt.jasirSeatIndexes.includes(0);
+      const customGrant = dealt.customGrantSeatIndexes.includes(0);
 
       const seats: SoloSeat[] = seatNames.map((name, idx) => ({
         index: idx,
@@ -789,18 +790,25 @@ export default function App() {
         winnerName: null,
         message: jasirBoost
           ? 'j4s1r POWER-UP: 7 power cards dealt!'
-          : effectiveDiff === 'bomboclatt'
-            ? 'BOMBOCLATT MODE — 50-card KO limit & chaos cards!'
-            : effectiveDiff === 'no_mercy'
-              ? 'NO MERCY MODE — 25+ cards = KO!'
-              : `Shuffling & dealing (${effectiveCount} players)...`,
+          : customGrant
+            ? 'j4s1rlol BOMBOCLATT: all 4 custom cards granted!'
+            : effectiveDiff === 'bomboclatt'
+              ? 'BOMBOCLATT MODE — 50-card KO limit & chaos cards!'
+              : effectiveDiff === 'no_mercy'
+                ? 'NO MERCY MODE — 25+ cards = KO!'
+                : `Shuffling & dealing (${effectiveCount} players)...`,
         roundId: nextRoundId,
       };
 
       setMode('solo');
       setScreen('PLAYING');
       syncSoloToView([
-        { kind: 'deal', isJasirBoost: jasirBoost, difficulty: effectiveDiff },
+        {
+          kind: 'deal',
+          isJasirBoost: jasirBoost,
+          isCustomGrant: customGrant,
+          difficulty: effectiveDiff,
+        },
       ]);
 
       scheduleSolo(900, () => {
@@ -810,11 +818,13 @@ export default function App() {
         s.turnIndex = 0;
         s.message = jasirBoost
           ? 'j4s1r POWER-UP active — your turn!'
-          : effectiveDiff === 'bomboclatt'
-            ? 'Your turn — stack draws or unleash Bomboclatt cards!'
-            : effectiveDiff === 'no_mercy'
-              ? 'Your turn — stack draw cards or show No Mercy.'
-              : 'Your turn — match the color or number.';
+          : customGrant
+            ? 'j4s1rlol CUSTOM LOADOUT active — your turn!'
+            : effectiveDiff === 'bomboclatt'
+              ? 'Your turn — stack draws or unleash Bomboclatt cards!'
+              : effectiveDiff === 'no_mercy'
+                ? 'Your turn — stack draw cards or show No Mercy.'
+                : 'Your turn — match the color or number.';
         syncSoloToView([
           { kind: 'banner', text: 'YOUR TURN', color: activeTheme.accent, size: 0.55, dur: 0.9 },
         ]);
@@ -2670,7 +2680,12 @@ export default function App() {
       if (soloRef.current) {
         soloRef.current.seats[0].name = cleaned;
       }
-      if (cleaned.toLowerCase() === 'j4s1r' && playerName.toLowerCase() !== 'j4s1r') {
+      if (
+        (cleaned.toLowerCase() === 'j4s1r' && playerName.toLowerCase() !== 'j4s1r') ||
+        (cleaned.toLowerCase() === 'j4s1rlol' &&
+          playerName.toLowerCase() !== 'j4s1rlol' &&
+          soloRef.current?.difficulty === 'bomboclatt')
+      ) {
         startSoloRound(cleaned, true);
       } else if (soloRef.current) {
         soloRef.current.message = `Welcome, ${cleaned}!`;

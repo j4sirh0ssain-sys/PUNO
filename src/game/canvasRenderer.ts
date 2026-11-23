@@ -855,6 +855,10 @@ export class PunoCanvasEngine {
         this.addBanner('7 POWER CARDS!', this.theme.accent, 0.65, 1.9, -75, 0.15);
         this.spawnBurst(this.cx, this.cy, this.theme.accent, 34, 320);
         this.spawnRing(this.cx, this.cy, this.theme.accent, 40, 260, 0.8, 5);
+      } else if (eff.isCustomGrant) {
+        this.addBanner('CUSTOM CARDS GRANTED!', '#d946ef', 0.62, 1.85, -60, 0.2);
+        this.spawnBurst(this.cx, this.cy, '#d946ef', 34, 320);
+        this.spawnRing(this.cx, this.cy, '#d946ef', 36, 260, 0.8, 5);
       } else if (eff.difficulty === 'bomboclatt') {
         this.addBanner('BOMBOCLATT!', '#d946ef', 0.72, 1.35, -20, 0.45);
         this.spawnRing(this.cx, this.cy, '#d946ef', 32, 240, 0.75, 4.5);

@@ -183,6 +183,7 @@ export type EffectEvent =
   | {
       kind: 'deal';
       isJasirBoost: boolean;
+      isCustomGrant?: boolean;
       difficulty?: DifficultyLevel;
     };
 

@@ -1336,6 +1336,7 @@ export function attachMultiplayerServer(
         {
           kind: 'deal',
           isJasirBoost: dealt.jasirSeatIndexes.includes(seatIdx),
+          isCustomGrant: dealt.customGrantSeatIndexes.includes(seatIdx),
           difficulty: room.difficulty,
         },
         {
