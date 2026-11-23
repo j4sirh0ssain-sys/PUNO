@@ -13,7 +13,6 @@ import {
 
 export function isDifficultyLevel(value: unknown): value is DifficultyLevel {
   return (
-    value === 'chill' ||
     value === 'normal' ||
     value === 'hard' ||
     value === 'no_mercy' ||
@@ -228,24 +227,62 @@ export function getNextAliveSeatIndex(
   return idx;
 }
 
+export interface DrawDeckOptions {
+  surjoUsed?: boolean;
+  surjoDrawChance?: number;
+}
+
 export function drawOneFromDeck(
   deck: Card[],
   discard: Card[],
-  targetHand: Card[]
+  targetHand: Card[],
+  options?: DrawDeckOptions
 ): { card: Card | null; reshuffled: boolean } {
+  const surjoUsed = Boolean(options?.surjoUsed);
+  const surjoDrawChance = options?.surjoDrawChance ?? 0;
+
   let reshuffled = false;
   if (deck.length === 0) {
     if (discard.length <= 1) {
       return { card: null, reshuffled: false };
     }
     const top = discard.pop()!;
-    const recycled = shuffle([...discard]);
+    const recycled = shuffle(
+      discard.filter((c) => !(surjoUsed && c.value === 'Gooner Surjo'))
+    );
     deck.push(...recycled);
     discard.length = 0;
     discard.push(top);
     reshuffled = true;
   }
-  const card = deck.pop() ?? null;
+
+  if (surjoUsed) {
+    for (let i = deck.length - 1; i >= 0; i--) {
+      if (deck[i].value === 'Gooner Surjo') {
+        deck.splice(i, 1);
+      }
+    }
+    if (deck.length === 0) {
+      return { card: null, reshuffled };
+    }
+  }
+
+  let card: Card | null = null;
+  if (!surjoUsed && surjoDrawChance > 0) {
+    const surjoIdx = deck.findIndex((c) => c.value === 'Gooner Surjo');
+    if (surjoIdx !== -1) {
+      if (Math.random() < surjoDrawChance) {
+        card = deck.splice(surjoIdx, 1)[0] ?? null;
+      } else if (deck.length > 1 && deck[deck.length - 1]?.value === 'Gooner Surjo') {
+        card = deck.splice(deck.length - 2, 1)[0] ?? null;
+      }
+    }
+  }
+
+  if (!card) {
+    card = deck.pop() ?? null;
+  }
+
   if (card) {
     targetHand.push(card);
   }
@@ -274,7 +311,6 @@ export function drawColorRoulette(
 }
 
 export function shouldCpuCallUno(difficulty: DifficultyLevel): boolean {
-  if (difficulty === 'chill') return Math.random() < 0.7;
   if (difficulty === 'normal') return Math.random() < 0.88;
   return true;
 }
@@ -289,12 +325,6 @@ export function chooseCpuCard(
 ): Card | null {
   const valid = cpuHand.filter((c) => canPlayCard(c, topCard, currentColor, pendingDrawMin));
   if (valid.length === 0) return null;
-
-  if (difficulty === 'chill') {
-    const nonWild = valid.filter((c) => c.color !== 'Wild');
-    const pool = nonWild.length > 0 ? nonWild : valid;
-    return pool[Math.floor(Math.random() * pool.length)];
-  }
 
   if (difficulty === 'normal') {
     const priority: Record<string, number> = {
@@ -376,11 +406,8 @@ export function chooseCpuCard(
 
 export function chooseCpuWildColor(
   cpuHand: Card[],
-  difficulty: DifficultyLevel = 'normal'
+  _difficulty: DifficultyLevel = 'normal'
 ): SuitColor {
-  if (difficulty === 'chill') {
-    return COLORS[Math.floor(Math.random() * COLORS.length)];
-  }
   const counts: Record<SuitColor, number> = { Red: 0, Blue: 0, Green: 0, Yellow: 0 };
   for (const c of cpuHand) {
     if (isSuitColor(c.color)) {

@@ -3,6 +3,7 @@ import { TABLE_THEMES, type TableTheme, type TableThemeId } from './themes.ts';
 import {
   BOMBOCLATT_CARD_VALUES,
   COLORS,
+  getBomboclattCardArtUrl,
   PALETTE,
   type Card,
   type ClientGameView,
@@ -310,6 +311,7 @@ export class PunoCanvasEngine {
   private pointerX = -999;
   private pointerY = -999;
   private reducedMotion = false;
+  private bomboclattImages = new Map<string, HTMLImageElement>();
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -328,6 +330,18 @@ export class PunoCanvasEngine {
     this.reducedMotion =
       typeof window !== 'undefined' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (typeof Image !== 'undefined') {
+      for (const value of BOMBOCLATT_CARD_VALUES) {
+        const url = getBomboclattCardArtUrl(value);
+        if (url) {
+          const img = new Image();
+          img.decoding = 'async';
+          img.src = url;
+          this.bomboclattImages.set(value, img);
+        }
+      }
+    }
 
     let seed = 7;
     const rand = () => {
@@ -932,7 +946,7 @@ export class PunoCanvasEngine {
     }
 
     if (eff.kind === 'crow_feathers') {
-      this.spawnCrowFeathers(36);
+      this.spawnCrowFeathers(56);
       this.addBanner('KAAAW! RAFATH KAUWA', '#e2e8f0', 0.74, 1.6, -78, 0.05);
       if (!this.reducedMotion) {
         this.tableFlash = 0.26;
@@ -1378,25 +1392,25 @@ export class PunoCanvasEngine {
     }
   }
 
-  private spawnCrowFeathers(n = 36): void {
-    const count = this.reducedMotion ? 8 : n;
-    const featherColors = ['#0f172a', '#1e293b', '#334155', '#090d16'];
+  private spawnCrowFeathers(n = 56): void {
+    const count = this.reducedMotion ? 10 : n;
+    const featherColors = ['#090d16', '#111827', '#1e293b', '#334155'];
     for (let i = 0; i < count; i++) {
-      const life = 2.5 + Math.random() * 1.8;
+      const life = 2.8 + Math.random() * 2.0;
       this.addParticle({
         kind: 'feather',
         x: Math.random() * this.width,
-        y: -25 - Math.random() * 120,
-        vx: (Math.random() - 0.5) * 75,
-        vy: 68 + Math.random() * 75,
+        y: -25 - Math.random() * 140,
+        vx: (Math.random() - 0.5) * 85,
+        vy: 72 + Math.random() * 82,
         life,
         max: life,
-        g: 10,
+        g: 9,
         rot: Math.random() * Math.PI * 2,
         vr: (Math.random() - 0.5) * 4.5,
         swayPh: Math.random() * Math.PI * 2,
-        swayAmp: 34 + Math.random() * 44,
-        size: 11 + Math.random() * 10,
+        swayAmp: 36 + Math.random() * 48,
+        size: 13 + Math.random() * 11,
         color: featherColors[Math.floor(Math.random() * featherColors.length)],
       });
     }
@@ -2318,7 +2332,7 @@ export class PunoCanvasEngine {
     const base = th.suitHex[card.color];
 
     if (isBomboclattCard) {
-      this.drawBomboclattCardInterior(ctx, card, fx, tone);
+      this.drawBomboclattCardInterior(ctx, card, dim);
     } else if (design === 'obsidian') {
       // Cyber Eclipse: matte dark body, glowing suit frame, diagonal tech corners (TR/BL), hex crest
       ctx.fillStyle = tone('#0d131d');
@@ -2942,298 +2956,44 @@ export class PunoCanvasEngine {
   private drawBomboclattCardInterior(
     ctx: CanvasRenderingContext2D,
     card: Card,
-    fx: number,
-    tone: (col: string) => string
+    dim = 0
   ): void {
+    const img = this.bomboclattImages.get(card.value);
     ctx.save();
-    this.roundRectPath(ctx, -35, -52, 70, 104, 6);
+    this.roundRectPath(ctx, -40, -57, 80, 114, 9);
     ctx.clip();
 
-    if (card.value === 'Rizzler Arvin') {
-      // Crimson/pink pixel mirror-selfie card with pixel hearts & LOVE meter
-      const g = ctx.createLinearGradient(0, -52, 0, 52);
-      g.addColorStop(0, tone('#fb7185'));
-      g.addColorStop(0.5, tone('#e11d48'));
-      g.addColorStop(1, tone('#881337'));
-      ctx.fillStyle = g;
-      ctx.fillRect(-35, -52, 70, 104);
-
-      ctx.strokeStyle = tone('#fecdd3');
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-32, -49, 64, 98);
-
-      // Pixel hearts in corners
-      const drawHeart = (hx: number, hy: number, sc: number, col: string) => {
-        ctx.fillStyle = tone(col);
-        ctx.beginPath();
-        ctx.arc(hx - 2.2 * sc, hy - 1.2 * sc, 2.4 * sc, 0, Math.PI * 2);
-        ctx.arc(hx + 2.2 * sc, hy - 1.2 * sc, 2.4 * sc, 0, Math.PI * 2);
-        ctx.lineTo(hx, hy + 4.2 * sc);
-        ctx.closePath();
-        ctx.fill();
-      };
-      drawHeart(-24, -40, 1.35, '#fff1f2');
-      drawHeart(24, -40, 1.1, '#fda4af');
-      drawHeart(-24, 24, 1.1, '#fda4af');
-      drawHeart(24, 24, 1.35, '#fff1f2');
-
-      // Mirror selfie inner frame
-      ctx.fillStyle = tone('#4c0519');
-      ctx.strokeStyle = tone('#fda4af');
-      ctx.lineWidth = 1.6;
-      this.roundRectPath(ctx, -20, -28, 40, 56, 4);
-      ctx.fill();
-      ctx.stroke();
-
-      // Portrait silhouette
-      ctx.fillStyle = tone('#1e1b2e'); // jacket
-      this.roundRectPath(ctx, -14, 6, 28, 22, 6);
-      ctx.fill();
-      ctx.fillStyle = tone('#fed7aa'); // face
-      ctx.beginPath();
-      ctx.arc(0, -8, 10, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = tone('#171717'); // hair
-      ctx.beginPath();
-      ctx.arc(0, -13, 10.2, Math.PI, 0);
-      ctx.fill();
-      // Sunglasses & smirk
-      ctx.fillStyle = tone('#09090b');
-      ctx.fillRect(-7.5, -10.5, 6, 3.8);
-      ctx.fillRect(1.5, -10.5, 6, 3.8);
-      ctx.fillRect(-1.5, -9.5, 3, 1.2);
-      // Smartphone held up
-      ctx.fillStyle = tone('#e2e8f0');
-      this.roundRectPath(ctx, 5, -3, 10, 16, 2);
-      ctx.fill();
-      ctx.fillStyle = tone('#f43f5e');
-      ctx.fillRect(7, -1, 6, 10);
-
-      if (fx >= 0.35) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = tone('#fff1f2');
-        ctx.font = '800 6.5px "Outfit", sans-serif';
-        ctx.fillText('LOVE ♥♥♥♡', 0, -40);
-        ctx.fillStyle = tone('#4c0519');
-        ctx.fillRect(-35, 34, 70, 18);
-        ctx.fillStyle = tone('#fecdd3');
-        ctx.font = '800 7px "Outfit", sans-serif';
-        ctx.fillText('RIZZLER ARVIN', 0, 43);
-      }
-    } else if (card.value === 'Rafath Kauwa') {
-      // Dark charcoal/slate card with crows & glowing red eyes
-      const g = ctx.createLinearGradient(0, -52, 0, 52);
-      g.addColorStop(0, tone('#272c35'));
-      g.addColorStop(1, tone('#0f131a'));
-      ctx.fillStyle = g;
-      ctx.fillRect(-35, -52, 70, 104);
-
-      ctx.strokeStyle = tone('#e2e8f0');
-      ctx.lineWidth = 1.8;
-      ctx.strokeRect(-32, -49, 64, 98);
-
-      // Falling mini feathers background
-      ctx.fillStyle = tone('#090d14');
-      for (const [fxp, fyp, rot] of [
-        [-22, -33, -0.4],
-        [23, -30, 0.5],
-        [-24, 14, 0.3],
-        [23, 10, -0.5],
-      ]) {
-        ctx.save();
-        ctx.translate(fxp, fyp);
-        ctx.rotate(rot);
-        ctx.beginPath();
-        ctx.ellipse(0, 0, 2.2, 6, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
-
-      // Striped torso
-      ctx.fillStyle = tone('#e2e8f0');
-      this.roundRectPath(ctx, -18, 6, 36, 26, 6);
-      ctx.fill();
-      ctx.fillStyle = tone('#1e293b');
-      for (let sy = 9; sy < 30; sy += 6) {
-        ctx.fillRect(-18, sy, 36, 3);
-      }
-
-      // Perched crows on shoulders
-      ctx.fillStyle = tone('#020617');
-      for (const sx of [-19, 19]) {
-        ctx.beginPath();
-        ctx.ellipse(sx, 4, 5.5, 7, sx < 0 ? -0.2 : 0.2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(sx, -3, 3.6, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Face & dark hair
-      ctx.fillStyle = tone('#e5c7b2');
-      ctx.beginPath();
-      ctx.arc(0, -10, 11, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = tone('#090d16');
-      ctx.beginPath();
-      ctx.arc(0, -15, 11.5, Math.PI, 0);
-      ctx.fill();
-
-      // Glowing red eyes
-      ctx.fillStyle = tone('#ef4444');
-      ctx.beginPath();
-      ctx.arc(-4.2, -10, 2.6, 0, Math.PI * 2);
-      ctx.arc(4.2, -10, 2.6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = tone('#ffffff');
-      ctx.beginPath();
-      ctx.arc(-4.2, -10, 1, 0, Math.PI * 2);
-      ctx.arc(4.2, -10, 1, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (fx >= 0.35) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = tone('#94a3b8');
-        ctx.font = '800 6.5px "Outfit", sans-serif';
-        ctx.fillText('PEEK 7.5s', 0, -40);
-        ctx.fillStyle = tone('#020617');
-        ctx.fillRect(-35, 34, 70, 18);
-        ctx.fillStyle = tone('#f8fafc');
-        ctx.font = '800 7px "Outfit", sans-serif';
-        ctx.fillText('RAFATH KAUWA', 0, 43);
-      }
-    } else if (card.value === 'Gooner Surjo') {
-      // Bright sky-blue card with white milk-splash frame & carton
-      const g = ctx.createLinearGradient(0, -52, 0, 52);
-      g.addColorStop(0, tone('#38bdf8'));
-      g.addColorStop(1, tone('#0284c7'));
-      ctx.fillStyle = g;
-      ctx.fillRect(-35, -52, 70, 104);
-
-      // Milk splash corner blobs
-      ctx.fillStyle = tone('#f8fafc');
-      for (const [bx, by, r] of [
-        [-28, -46, 8],
-        [28, -44, 7],
-        [-26, 26, 7],
-        [27, 25, 8],
-        [-18, -50, 5],
-        [18, -50, 5],
-      ]) {
-        ctx.beginPath();
-        ctx.arc(bx, by, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.strokeStyle = tone('#ffffff');
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-32, -49, 64, 98);
-
-      // Mini MILK carton badges
-      ctx.fillStyle = tone('#e0f2fe');
-      ctx.strokeStyle = tone('#0369a1');
-      ctx.lineWidth = 1;
-      ctx.fillRect(-28, -32, 9, 13);
-      ctx.strokeRect(-28, -32, 9, 13);
-      ctx.fillRect(19, -32, 9, 13);
-      ctx.strokeRect(19, -32, 9, 13);
-
-      // Character with sunglasses holding milk carton
-      ctx.fillStyle = tone('#0f172a');
-      this.roundRectPath(ctx, -16, 6, 32, 26, 6);
-      ctx.fill();
-      ctx.fillStyle = tone('#fed7aa');
-      ctx.beginPath();
-      ctx.arc(0, -10, 10.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = tone('#1e293b');
-      ctx.beginPath();
-      ctx.arc(0, -15, 10.8, Math.PI, 0);
-      ctx.fill();
-      // Sunglasses
-      ctx.fillStyle = tone('#020617');
-      ctx.fillRect(-8, -12, 7, 4.2);
-      ctx.fillRect(1, -12, 7, 4.2);
-      ctx.fillRect(-1, -11, 2, 1.4);
-
-      // Big white carton in center hand
-      ctx.fillStyle = tone('#ffffff');
-      ctx.strokeStyle = tone('#0284c7');
-      ctx.lineWidth = 1.4;
-      this.roundRectPath(ctx, -8, 1, 16, 21, 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = tone('#0284c7');
-      ctx.fillRect(-6, 7, 12, 5);
-
-      if (fx >= 0.35) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = tone('#0369a1');
-        ctx.font = '800 6.5px "Outfit", sans-serif';
-        ctx.fillText('1× KO CARD', 0, -40);
-        ctx.fillStyle = tone('#0369a1');
-        ctx.fillRect(-35, 34, 70, 18);
-        ctx.fillStyle = tone('#ffffff');
-        ctx.font = '800 7px "Outfit", sans-serif';
-        ctx.fillText('GOONER SURJO', 0, 43);
-      }
+    if (img && img.complete && img.naturalWidth > 0) {
+      const crop =
+        card.value === 'Gooner Surjo'
+          ? { mx: 0.078, my: 0.048 }
+          : card.value === 'Rafath Kauwa'
+            ? { mx: 0.025, my: 0.02 }
+            : { mx: 0.012, my: 0.012 };
+      const sx = img.naturalWidth * crop.mx;
+      const sy = img.naturalHeight * crop.my;
+      const sw = img.naturalWidth * (1 - crop.mx * 2);
+      const sh = img.naturalHeight * (1 - crop.my * 2);
+      ctx.drawImage(img, sx, sy, sw, sh, -40, -57, 80, 114);
     } else {
-      // Toothpick Alif: dark plum & gold-framed gym barbell card
-      const g = ctx.createLinearGradient(0, -52, 0, 52);
-      g.addColorStop(0, tone('#3b1a33'));
-      g.addColorStop(1, tone('#140814'));
-      ctx.fillStyle = g;
-      ctx.fillRect(-35, -52, 70, 104);
-
-      ctx.strokeStyle = tone('#fbbf24');
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-32, -49, 64, 98);
-
-      // Barbell behind shoulders
-      ctx.fillStyle = tone('#cbd5e1');
-      ctx.fillRect(-30, 5, 60, 3.2);
-      // Heavy plates
-      ctx.fillStyle = tone('#64748b');
-      ctx.strokeStyle = tone('#fbbf24');
-      ctx.lineWidth = 1.2;
-      for (const px of [-28, -24, 21, 25]) {
-        ctx.fillRect(px, -3, 3.5, 19);
-        ctx.strokeRect(px, -3, 3.5, 19);
-      }
-
-      // Lifter in black tank top
-      ctx.fillStyle = tone('#0f172a');
-      this.roundRectPath(ctx, -13, 6, 26, 26, 5);
-      ctx.fill();
-      ctx.fillStyle = tone('#fdba74');
-      ctx.beginPath();
-      ctx.arc(0, -10, 10, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = tone('#171717');
-      ctx.beginPath();
-      ctx.arc(0, -15, 10.4, Math.PI, 0);
-      ctx.fill();
-      // Serious brow
-      ctx.fillStyle = tone('#09090b');
-      ctx.fillRect(-6, -11, 4, 2);
-      ctx.fillRect(2, -11, 4, 2);
-
-      if (fx >= 0.35) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = tone('#fde68a');
-        ctx.font = '800 6.5px "Outfit", sans-serif';
-        ctx.fillText('STEAL POWER', 0, -40);
-        ctx.fillStyle = tone('#451a03');
-        ctx.fillRect(-35, 34, 70, 18);
-        ctx.fillStyle = tone('#fde68a');
-        ctx.font = '800 6.8px "Outfit", sans-serif';
-        ctx.fillText('TOOTHPICK ALIF', 0, 43);
-      }
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(-40, -57, 80, 114);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = '800 8px "Outfit", sans-serif';
+      ctx.fillText(card.value.toUpperCase(), 0, 0);
     }
 
+    if (dim > 0.01) {
+      ctx.fillStyle = `rgba(8, 12, 18, ${(dim * 0.72).toFixed(3)})`;
+      ctx.fillRect(-40, -57, 80, 114);
+    }
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.lineWidth = 1.2;
+    this.roundRectPath(ctx, -39.4, -56.4, 78.8, 112.8, 8.6);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -3375,23 +3135,30 @@ export class PunoCanvasEngine {
         ctx.save();
         ctx.translate(p.x, p.y);
         ctx.rotate(p.rot);
-        ctx.globalAlpha = Math.min(1, f * 2.4);
+        ctx.globalAlpha = Math.min(1, f * 2.5);
         const len = p.size;
-        const wid = p.size * 0.34;
+        const wid = p.size * 0.36;
         ctx.fillStyle = p.color;
-        ctx.beginPath();
-        ctx.moveTo(0, -len);
-        ctx.quadraticCurveTo(wid, -len * 0.2, wid * 0.55, len * 0.55);
-        ctx.lineTo(0, len);
-        ctx.lineTo(-wid * 0.55, len * 0.55);
-        ctx.quadraticCurveTo(-wid, -len * 0.2, 0, -len);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(203, 213, 225, 0.35)';
+        ctx.strokeStyle = 'rgba(226, 232, 240, 0.55)';
         ctx.lineWidth = 0.9;
         ctx.beginPath();
+        ctx.moveTo(0, -len);
+        ctx.quadraticCurveTo(wid, -len * 0.25, wid * 0.7, len * 0.15);
+        ctx.lineTo(wid * 0.28, len * 0.22);
+        ctx.lineTo(wid * 0.55, len * 0.58);
+        ctx.lineTo(0, len);
+        ctx.lineTo(-wid * 0.55, len * 0.58);
+        ctx.lineTo(-wid * 0.24, len * 0.18);
+        ctx.lineTo(-wid * 0.72, len * 0.1);
+        ctx.quadraticCurveTo(-wid, -len * 0.25, 0, -len);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(241, 245, 249, 0.7)';
+        ctx.lineWidth = 1.05;
+        ctx.beginPath();
         ctx.moveTo(0, -len * 0.85);
-        ctx.lineTo(0, len * 1.15);
+        ctx.lineTo(0, len * 1.18);
         ctx.stroke();
         ctx.restore();
       } else {

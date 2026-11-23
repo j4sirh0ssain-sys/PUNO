@@ -5,7 +5,7 @@ export type CardColor = SuitColor | 'Wild';
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 10;
 
-export type DifficultyLevel = 'chill' | 'normal' | 'hard' | 'no_mercy' | 'bomboclatt';
+export type DifficultyLevel = 'normal' | 'hard' | 'no_mercy' | 'bomboclatt';
 
 export interface DifficultyInfo {
   id: DifficultyLevel;
@@ -13,33 +13,25 @@ export interface DifficultyInfo {
   tier: string;
   summary: string;
   accent: string;
-  level: 1 | 2 | 3 | 4 | 5;
+  level: 1 | 2 | 3 | 4;
 }
 
 export const DIFFICULTY_LIST: DifficultyInfo[] = [
   {
-    id: 'chill',
-    label: 'Casual',
-    tier: 'Tier 1',
-    summary: 'Relaxed CPU · Classic 108-card deck',
-    accent: '#34d399',
-    level: 1,
-  },
-  {
     id: 'normal',
     label: 'Standard',
-    tier: 'Tier 2',
+    tier: 'Tier 1',
     summary: 'Balanced CPU · Classic UNO rules',
     accent: '#38bdf8',
-    level: 2,
+    level: 1,
   },
   {
     id: 'hard',
     label: 'Ruthless',
-    tier: 'Tier 3',
+    tier: 'Tier 2',
     summary: 'Tactical CPU · Action chaining & sharp color traps',
     accent: '#fb923c',
-    level: 3,
+    level: 2,
   },
   {
     id: 'no_mercy',
@@ -47,7 +39,7 @@ export const DIFFICULTY_LIST: DifficultyInfo[] = [
     tier: 'Deadly',
     summary: '+6, +10, Color Roulette, Skip All, Dump & 25-card Mercy KO',
     accent: '#f43f5e',
-    level: 4,
+    level: 3,
   },
   {
     id: 'bomboclatt',
@@ -55,7 +47,7 @@ export const DIFFICULTY_LIST: DifficultyInfo[] = [
     tier: 'Chaotic',
     summary: 'All No Mercy cards + Rizzler Arvin, Rafath Kauwa, Gooner Surjo & Toothpick Alif · 50-card KO limit',
     accent: '#d946ef',
-    level: 5,
+    level: 4,
   },
 ];
 
@@ -65,6 +57,23 @@ export const BOMBOCLATT_CARD_VALUES = [
   'Gooner Surjo',
   'Toothpick Alif',
 ] as const;
+
+export type BomboclattCardValue = (typeof BOMBOCLATT_CARD_VALUES)[number];
+
+export const BOMBOCLATT_CARD_ART: Record<BomboclattCardValue, string> = {
+  'Rizzler Arvin': 'assets/aistudio/Rizzler_Arvin_a59e81ef.jpeg',
+  'Rafath Kauwa': 'assets/aistudio/Kauwa_Rafath_d6d8d77e.jpeg',
+  'Gooner Surjo': 'assets/aistudio/Gooner_Surjo_7bf92deb.jpeg',
+  'Toothpick Alif': 'assets/aistudio/Toothpick_Alif_f4a60960.jpeg',
+};
+
+export function getBomboclattCardArtUrl(value: string): string | null {
+  const rel = BOMBOCLATT_CARD_ART[value as BomboclattCardValue];
+  if (!rel) return null;
+  const base = (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
+  const normalizedBase = base.endsWith('/') ? base : `${base}/`;
+  return `${normalizedBase}${rel}`;
+}
 
 export const RIZZ_PICKUP_LINES = [
   'Did you get hurt bcuz you just fell from heaven',
@@ -337,6 +346,7 @@ export type ClientWsAction =
       type: 'rizz_response';
       promptId: string;
       accept: boolean;
+      cardUid?: number;
     }
   | {
       type: 'draw';

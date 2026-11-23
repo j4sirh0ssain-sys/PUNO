@@ -53,6 +53,7 @@ import {
   BOMBOCLATT_CARD_VALUES,
   COLORS,
   DIFFICULTY_LIST,
+  getBomboclattCardArtUrl,
   MAX_PLAYERS,
   MIN_PLAYERS,
   POWER_CARD_VALUES,
@@ -217,26 +218,17 @@ function ShowcaseCard({
   zIndex,
   floatDelay,
 }: ShowcaseCardProps) {
-  const isBomboclattBadge = label === 'RIZZ' || label === 'SURJO' || label === 'KAUWA';
-  const suitColor =
-    label === 'RIZZ'
-      ? '#e11d48'
-      : label === 'SURJO'
-        ? '#0284c7'
-        : label === 'KAUWA'
-          ? '#1e293b'
-          : theme.suitHex[suit];
+  const artUrl = getBomboclattCardArtUrl(label);
+  const suitColor = theme.suitHex[suit];
   const design = theme.cardDesign;
-  const isDarkFace = design === 'obsidian' || design === 'sunburst' || label === 'KAUWA';
-  const isWild = suit === 'Wild' && !isBomboclattBadge;
+  const isDarkFace = design === 'obsidian' || design === 'sunburst';
+  const isWild = suit === 'Wild' && !artUrl;
   const cornerTextColor = isDarkFace
     ? isWild
       ? theme.accent
-      : label === 'KAUWA'
-        ? '#f8fafc'
-        : suitColor
+      : suitColor
     : '#ffffff';
-  const centerTextColor = isWild || isBomboclattBadge ? '#ffffff' : suitColor;
+  const centerTextColor = isWild ? '#ffffff' : suitColor;
   const uid = `sc-${theme.id}-${suit}-${label.replace(/[^a-z0-9]/gi, '')}`;
 
   return (
@@ -275,136 +267,153 @@ function ShowcaseCard({
       style={{
         x: xOffset,
         zIndex,
-        backgroundColor: theme.cardFrame,
-        borderColor: theme.cardFrameOutline,
+        backgroundColor: artUrl ? '#0f172a' : theme.cardFrame,
+        borderColor: artUrl ? 'rgba(255,255,255,0.4)' : theme.cardFrameOutline,
         boxShadow: design === 'comic' ? '6px 8px 0 rgba(12, 14, 26, 0.85)' : undefined,
       }}
-      className="absolute w-28 h-40 rounded-xl p-1.5 shadow-2xl border-2 cursor-pointer select-none"
+      className={`absolute w-28 h-40 rounded-xl shadow-2xl border-2 cursor-pointer select-none overflow-hidden ${
+        artUrl ? 'p-0' : 'p-1.5'
+      }`}
     >
-      <div
-        className="w-full h-full rounded-lg flex items-center justify-center relative overflow-hidden"
-        style={{
-          backgroundColor:
-            isBomboclattBadge
-              ? suitColor
-              : design === 'obsidian'
+      {artUrl ? (
+        <img
+          src={artUrl}
+          alt={label}
+          draggable={false}
+          className="w-full h-full object-cover"
+          style={{
+            transform:
+              label === 'Gooner Surjo'
+                ? 'scale(1.18)'
+                : label === 'Rafath Kauwa'
+                  ? 'scale(1.06)'
+                  : 'scale(1.02)',
+          }}
+        />
+      ) : (
+        <div
+          className="w-full h-full rounded-lg flex items-center justify-center relative overflow-hidden"
+          style={{
+            backgroundColor:
+              design === 'obsidian'
                 ? '#0d131d'
                 : design === 'sunburst'
                   ? '#110f0a'
                   : suitColor,
-          border:
-            design === 'comic'
-              ? '2px solid #141414'
-              : design === 'obsidian'
-                ? `2px solid ${isWild ? '#38bdf8' : suitColor}`
-                : design === 'sunburst'
-                  ? '1.5px solid #d4a63a'
-                  : design === 'deco'
-                    ? '1.5px solid #f0d086'
-                    : '1px solid rgba(255,255,255,0.28)',
-        }}
-      >
-        <span
-          className="absolute top-1.5 left-2 font-display italic font-extrabold text-[13px] leading-none"
-          style={{ color: cornerTextColor, textShadow: '0 1px 2px rgba(0,0,0,0.45)' }}
+            border:
+              design === 'comic'
+                ? '2px solid #141414'
+                : design === 'obsidian'
+                  ? `2px solid ${isWild ? '#38bdf8' : suitColor}`
+                  : design === 'sunburst'
+                    ? '1.5px solid #d4a63a'
+                    : design === 'deco'
+                      ? '1.5px solid #f0d086'
+                      : '1px solid rgba(255,255,255,0.28)',
+          }}
         >
-          {label}
-        </span>
-        <span
-          className="absolute bottom-1.5 right-2 font-display italic font-extrabold text-[13px] leading-none rotate-180"
-          style={{ color: cornerTextColor, textShadow: '0 -1px 2px rgba(0,0,0,0.45)' }}
-        >
-          {label}
-        </span>
+          <span
+            className="absolute top-1.5 left-2 font-display italic font-extrabold text-[13px] leading-none"
+            style={{ color: cornerTextColor, textShadow: '0 1px 2px rgba(0,0,0,0.45)' }}
+          >
+            {label}
+          </span>
+          <span
+            className="absolute bottom-1.5 right-2 font-display italic font-extrabold text-[13px] leading-none rotate-180"
+            style={{ color: cornerTextColor, textShadow: '0 -1px 2px rgba(0,0,0,0.45)' }}
+          >
+            {label}
+          </span>
 
-        <svg viewBox="-40 -55 80 110" className="w-full h-full pointer-events-none" aria-hidden="true">
-          <defs>
-            {isWild && (
-              <linearGradient id={uid} x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor={theme.suitHex.Red} />
-                <stop offset="33%" stopColor={theme.suitHex.Blue} />
-                <stop offset="66%" stopColor={theme.suitHex.Green} />
-                <stop offset="100%" stopColor={theme.suitHex.Yellow} />
-              </linearGradient>
+          <svg viewBox="-40 -55 80 110" className="w-full h-full pointer-events-none" aria-hidden="true">
+            <defs>
+              {isWild && (
+                <linearGradient id={uid} x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor={theme.suitHex.Red} />
+                  <stop offset="33%" stopColor={theme.suitHex.Blue} />
+                  <stop offset="66%" stopColor={theme.suitHex.Green} />
+                  <stop offset="100%" stopColor={theme.suitHex.Yellow} />
+                </linearGradient>
+              )}
+            </defs>
+            {design === 'obsidian' && (
+              <polygon
+                points="0,-29 25,-14.5 25,14.5 0,29 -25,14.5 -25,-14.5"
+                fill={isWild ? `url(#${uid})` : '#101927'}
+                stroke={isWild ? '#ffffff' : suitColor}
+                strokeWidth="2.4"
+              />
             )}
-          </defs>
-          {design === 'obsidian' && (
-            <polygon
-              points="0,-29 25,-14.5 25,14.5 0,29 -25,14.5 -25,-14.5"
-              fill={isWild ? `url(#${uid})` : '#101927'}
-              stroke={isWild ? '#ffffff' : suitColor}
-              strokeWidth="2.4"
-            />
-          )}
-          {design === 'sunburst' && (
-            <polygon
-              points="-12,-29 12,-29 29,-12 29,12 12,29 -12,29 -29,12 -29,-12"
-              fill={isWild ? `url(#${uid})` : '#1d1911'}
-              stroke={isWild ? '#fde08d' : suitColor}
-              strokeWidth="2.4"
-            />
-          )}
-          {design === 'crest' && (
-            <circle
-              cx="0"
-              cy="0"
-              r="27"
-              fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
-              stroke="#ffffff"
-              strokeWidth="2.2"
-            />
-          )}
-          {(design === 'deco' || design === 'prism') && (
-            <polygon
-              points="0,-41 30,0 0,41 -30,0"
-              fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
-              stroke={design === 'deco' ? '#e8c474' : '#ffffff'}
-              strokeWidth="2"
-            />
-          )}
-          {design === 'classic' && (
-            <ellipse
-              cx="0"
-              cy="0"
-              rx="28"
-              ry="43"
-              transform="rotate(26)"
-              fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
-              stroke="rgba(255,255,255,0.45)"
-              strokeWidth="1.6"
-            />
-          )}
-          {design === 'comic' && (
-            <g transform="rotate(24)">
-              <ellipse cx="3" cy="3.5" rx="28" ry="41" fill="#141414" />
+            {design === 'sunburst' && (
+              <polygon
+                points="-12,-29 12,-29 29,-12 29,12 12,29 -12,29 -29,12 -29,-12"
+                fill={isWild ? `url(#${uid})` : '#1d1911'}
+                stroke={isWild ? '#fde08d' : suitColor}
+                strokeWidth="2.4"
+              />
+            )}
+            {design === 'crest' && (
+              <circle
+                cx="0"
+                cy="0"
+                r="27"
+                fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
+                stroke="#ffffff"
+                strokeWidth="2.2"
+              />
+            )}
+            {(design === 'deco' || design === 'prism') && (
+              <polygon
+                points="0,-41 30,0 0,41 -30,0"
+                fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
+                stroke={design === 'deco' ? '#e8c474' : '#ffffff'}
+                strokeWidth="2"
+              />
+            )}
+            {design === 'classic' && (
               <ellipse
                 cx="0"
                 cy="0"
                 rx="28"
-                ry="41"
+                ry="43"
+                transform="rotate(26)"
                 fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
-                stroke="#141414"
-                strokeWidth="2.6"
+                stroke="rgba(255,255,255,0.45)"
+                strokeWidth="1.6"
               />
-            </g>
-          )}
-        </svg>
+            )}
+            {design === 'comic' && (
+              <g transform="rotate(24)">
+                <ellipse cx="3" cy="3.5" rx="28" ry="41" fill="#141414" />
+                <ellipse
+                  cx="0"
+                  cy="0"
+                  rx="28"
+                  ry="41"
+                  fill={isWild ? `url(#${uid})` : theme.cardCenterBg}
+                  stroke="#141414"
+                  strokeWidth="2.6"
+                />
+              </g>
+            )}
+          </svg>
 
-        <span
-          className={`absolute font-display italic font-extrabold leading-none tracking-tight ${
-            label.length >= 3 ? 'text-xl' : label.length > 1 ? 'text-2xl' : 'text-3xl'
-          }`}
-          style={{
-            color: centerTextColor,
-            textShadow:
-              design === 'comic'
-                ? '2px 2.5px 0 #141414'
-                : '0 2px 3px rgba(0,0,0,0.35)',
-          }}
-        >
-          {label}
-        </span>
-      </div>
+          <span
+            className={`absolute font-display italic font-extrabold leading-none tracking-tight ${
+              label.length >= 3 ? 'text-xl' : label.length > 1 ? 'text-2xl' : 'text-3xl'
+            }`}
+            style={{
+              color: centerTextColor,
+              textShadow:
+                design === 'comic'
+                  ? '2px 2.5px 0 #141414'
+                  : '0 2px 3px rgba(0,0,0,0.35)',
+            }}
+          >
+            {label}
+          </span>
+        </div>
+      )}
     </motion.div>
   );
 }
@@ -491,6 +500,7 @@ export default function App() {
   const [peekSecondsLeft, setPeekSecondsLeft] = useState<number>(0);
   const [dismissedPeekKey, setDismissedPeekKey] = useState<string | null>(null);
   const [rizzBusyPromptId, setRizzBusyPromptId] = useState<string | null>(null);
+  const [selectedRizzCardUid, setSelectedRizzCardUid] = useState<number | null>(null);
   const clockOffsetRef = useRef<number>(0);
   const [roomBusy, setRoomBusy] = useState(false);
   const [networkError, setNetworkError] = useState<string | null>(null);
@@ -843,21 +853,10 @@ export default function App() {
     s: SoloInternalState,
     targetHand: Card[]
   ): { card: Card | null; reshuffled: boolean } => {
-    const res = drawOneFromDeck(s.deck, s.discard, targetHand);
-    if (res.reshuffled && s.goonerSurjoUsed) {
-      for (let i = s.deck.length - 1; i >= 0; i--) {
-        if (s.deck[i].value === 'Gooner Surjo') {
-          s.deck.splice(i, 1);
-        }
-      }
-      if (res.card && res.card.value === 'Gooner Surjo') {
-        const idx = targetHand.findIndex((c) => c.uid === res.card!.uid);
-        if (idx !== -1) targetHand.splice(idx, 1);
-        const retry = drawOneFromDeck(s.deck, s.discard, targetHand);
-        return { card: retry.card, reshuffled: res.reshuffled || retry.reshuffled };
-      }
-    }
-    return res;
+    return drawOneFromDeck(s.deck, s.discard, targetHand, {
+      surjoUsed: s.goonerSurjoUsed,
+      surjoDrawChance: s.difficulty === 'bomboclatt' ? 0.05 : 0,
+    });
   };
 
   const endSoloRoundWithWinner = (
@@ -1057,12 +1056,13 @@ export default function App() {
   );
 
   const handleSoloRizzResponse = useCallback(
-    (accept: boolean) => {
+    (accept: boolean, chosenCardUid?: number) => {
       const s = soloRef.current;
       if (!s || !s.pendingRizz || s.winner) return;
       const pending = s.pendingRizz;
       s.pendingRizz = null;
       setRizzBusyPromptId(null);
+      setSelectedRizzCardUid(null);
 
       const expectedRound = s.roundId;
       const fromSeat = s.seats[pending.fromIndex];
@@ -1070,7 +1070,12 @@ export default function App() {
       const effects: EffectEvent[] = [];
 
       if (accept && fromSeat && selfSeat.hand.length > 0) {
-        const pickIdx = Math.floor(Math.random() * selfSeat.hand.length);
+        const requestedIdx =
+          typeof chosenCardUid === 'number'
+            ? selfSeat.hand.findIndex((c) => c.uid === chosenCardUid)
+            : -1;
+        const pickIdx =
+          requestedIdx !== -1 ? requestedIdx : Math.floor(Math.random() * selfSeat.hand.length);
         const [gifted] = selfSeat.hand.splice(pickIdx, 1);
         fromSeat.hand.push(gifted);
         effects.push({
@@ -1220,8 +1225,8 @@ export default function App() {
       const nextIdx = advanceSoloIndex(s, 1);
       const nextSeat = s.seats[nextIdx];
       s.message = accepted
-        ? `${targetSeat.name} loved Rizzler Arvin 👍 (+1 card)! ${nextSeat.name}'s turn.`
-        : `${targetSeat.name} curved Rizzler Arvin 👎! ${nextSeat.name}'s turn.`;
+        ? `${targetSeat.name} loved Rizzler Arvin 👍 ("${line}") (+1 card)! ${nextSeat.name}'s turn.`
+        : `${targetSeat.name} curved Rizzler Arvin 👎 ("${line}")! ${nextSeat.name}'s turn.`;
       scheduleNextTurn(nextIdx, 950);
       return true;
     }
@@ -2526,13 +2531,18 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [activeView, mode, screen]);
 
+  const activeRizzPromptId = activeView?.pendingRizzPrompt?.promptId ?? null;
+  useEffect(() => {
+    setSelectedRizzCardUid(null);
+  }, [activeRizzPromptId]);
+
   const handleRizzPromptChoice = useCallback(
-    (promptId: string, accept: boolean) => {
+    (promptId: string, accept: boolean, cardUid?: number) => {
       setRizzBusyPromptId(promptId);
       if (mode === 'multiplayer') {
-        sendWsAction({ type: 'rizz_response', promptId, accept });
+        sendWsAction({ type: 'rizz_response', promptId, accept, cardUid });
       } else {
-        handleSoloRizzResponse(accept);
+        handleSoloRizzResponse(accept, cardUid);
       }
     },
     [handleSoloRizzResponse, mode, sendWsAction]
@@ -2924,7 +2934,7 @@ export default function App() {
                         suit="Blue"
                         label={
                           difficulty === 'bomboclatt'
-                            ? 'SURJO'
+                            ? 'Gooner Surjo'
                             : difficulty === 'no_mercy'
                               ? '⊘⊘'
                               : '7'
@@ -2940,7 +2950,7 @@ export default function App() {
                         suit="Red"
                         label={
                           difficulty === 'bomboclatt'
-                            ? 'RIZZ'
+                            ? 'Rizzler Arvin'
                             : difficulty === 'no_mercy'
                               ? 'ALL'
                               : '+2'
@@ -2956,7 +2966,7 @@ export default function App() {
                         suit="Wild"
                         label={
                           difficulty === 'bomboclatt'
-                            ? 'KAUWA'
+                            ? 'Rafath Kauwa'
                             : difficulty === 'no_mercy'
                               ? '+10'
                               : '+4'
@@ -3103,14 +3113,13 @@ export default function App() {
                       </div>
 
                       <div
-                        className="grid grid-cols-6 sm:grid-cols-5 gap-1 p-1 rounded-xl border bg-black/25"
+                        className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 rounded-xl border bg-black/25"
                         style={{ borderColor: activeTheme.surfaceBorder }}
                         role="radiogroup"
                         aria-label="Difficulty level"
                       >
-                        {DIFFICULTY_LIST.map((d, idx) => {
+                        {DIFFICULTY_LIST.map((d) => {
                           const selected = d.id === difficulty;
-                          const mobileSpan = idx < 3 ? 'col-span-2 sm:col-span-1' : 'col-span-3 sm:col-span-1';
                           return (
                             <button
                               key={d.id}
@@ -3118,7 +3127,7 @@ export default function App() {
                               role="radio"
                               aria-checked={selected}
                               onClick={() => selectDifficulty(d.id)}
-                              className={`${mobileSpan} h-9 rounded-lg text-[11px] sm:text-xs font-bold transition-all whitespace-nowrap px-1.5 focus-visible:outline-2 focus-visible:outline-white ${
+                              className={`h-9 rounded-lg text-[11px] sm:text-xs font-bold transition-all whitespace-nowrap px-2 focus-visible:outline-2 focus-visible:outline-white ${
                                 selected ? 'text-[#10141e] shadow-sm' : 'text-[#b8cac8] hover:text-white'
                               }`}
                               style={selected ? { backgroundColor: d.accent } : undefined}
@@ -3673,6 +3682,7 @@ export default function App() {
             const peek = activeView.peekTarget!;
             const peekKey = `${peek.targetIndex}-${peek.expiresAt}`;
             const pct = Math.max(0, Math.min(100, (peekSecondsLeft / 7.5) * 100));
+            const kauwaArt = getBomboclattCardArtUrl('Rafath Kauwa');
             return (
               <motion.div
                 key={peekKey}
@@ -3680,18 +3690,31 @@ export default function App() {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -12, scale: 0.94 }}
                 transition={{ type: 'spring', stiffness: 320, damping: 24 }}
-                className="fixed top-16 left-1/2 -translate-x-1/2 z-[35] w-[92vw] max-w-md rounded-2xl border p-4 shadow-2xl backdrop-blur-md"
+                className="fixed top-16 left-1/2 -translate-x-1/2 z-[35] w-[94vw] max-w-lg rounded-2xl border p-4 shadow-2xl backdrop-blur-md"
                 style={{
-                  backgroundColor: 'rgba(15, 19, 26, 0.94)',
+                  backgroundColor: 'rgba(15, 19, 26, 0.95)',
                   borderColor: '#94a3b8',
                 }}
               >
                 <div className="flex items-center justify-between gap-3 mb-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Eye className="w-4 h-4 text-[#f87171] shrink-0" />
-                    <span className="text-xs sm:text-sm font-bold text-[#f8fafc] truncate">
-                      Rafath Kauwa · {peek.targetName}&apos;s Hand
-                    </span>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {kauwaArt ? (
+                      <img
+                        src={kauwaArt}
+                        alt="Rafath Kauwa"
+                        className="w-7 h-10 rounded object-cover border border-white/25 shrink-0"
+                      />
+                    ) : (
+                      <Eye className="w-4 h-4 text-[#f87171] shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <div className="text-xs sm:text-sm font-bold text-[#f8fafc] truncate">
+                        Rafath Kauwa · {peek.targetName}&apos;s Hand ({peek.cards.length})
+                      </div>
+                      <div className="text-[10px] text-[#94a3b8]">
+                        Visible only to you
+                      </div>
+                    </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className="text-xs font-mono-tabular font-bold text-[#fca5a5]">
@@ -3715,29 +3738,61 @@ export default function App() {
                   />
                 </div>
 
-                <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
+                <div className="flex flex-wrap gap-2 max-h-44 overflow-y-auto py-0.5">
                   {peek.cards.map((c) => {
-                    const isBomb = (BOMBOCLATT_CARD_VALUES as readonly string[]).includes(c.value);
-                    const chipBg =
-                      c.value === 'Rizzler Arvin'
-                        ? '#be123c'
-                        : c.value === 'Rafath Kauwa'
-                          ? '#1e293b'
-                          : c.value === 'Gooner Surjo'
-                            ? '#0284c7'
-                            : c.value === 'Toothpick Alif'
-                              ? '#581c87'
-                              : activeTheme.suitHex[c.color];
+                    const artUrl = getBomboclattCardArtUrl(c.value);
+                    if (artUrl) {
+                      return (
+                        <div
+                          key={c.uid}
+                          className="w-12 h-[68px] rounded-lg overflow-hidden border border-yellow-300/70 shadow-md shrink-0"
+                          title={c.value}
+                        >
+                          <img
+                            src={artUrl}
+                            alt={c.value}
+                            className="w-full h-full object-cover"
+                            style={{
+                              transform:
+                                c.value === 'Gooner Surjo'
+                                  ? 'scale(1.18)'
+                                  : c.value === 'Rafath Kauwa'
+                                    ? 'scale(1.06)'
+                                    : 'scale(1.02)',
+                            }}
+                          />
+                        </div>
+                      );
+                    }
+                    const cardBg = activeTheme.suitHex[c.color];
+                    const shortVal =
+                      c.value === 'Skip All'
+                        ? '⊘⊘'
+                        : c.value === 'Skip'
+                          ? '⊘'
+                          : c.value === 'Reverse'
+                            ? '↻'
+                            : c.value === 'Roulette'
+                              ? 'CLR'
+                              : c.value === 'Dump'
+                                ? 'ALL'
+                                : c.value;
                     return (
                       <div
                         key={c.uid}
-                        className="px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold text-white shadow-sm"
-                        style={{
-                          backgroundColor: chipBg,
-                          borderColor: isBomb ? '#fde047' : 'rgba(255,255,255,0.28)',
-                        }}
+                        className="w-12 h-[68px] rounded-lg border-2 border-white/80 shadow-md flex flex-col items-center justify-between p-1 text-white shrink-0 relative overflow-hidden"
+                        style={{ backgroundColor: cardBg }}
+                        title={`${c.color} ${c.value}`}
                       >
-                        {c.color === 'Wild' ? c.value : `${c.color.charAt(0)} ${c.value}`}
+                        <span className="self-start text-[9px] font-black leading-none">
+                          {shortVal}
+                        </span>
+                        <span className="font-display italic font-extrabold text-sm leading-none">
+                          {shortVal}
+                        </span>
+                        <span className="self-end text-[9px] font-black leading-none rotate-180">
+                          {shortVal}
+                        </span>
                       </div>
                     );
                   })}
@@ -3752,6 +3807,12 @@ export default function App() {
         {screen === 'PLAYING' && activeView?.pendingRizzPrompt && (() => {
           const prompt = activeView.pendingRizzPrompt!;
           const isBusy = rizzBusyPromptId === prompt.promptId;
+          const rizzArt = getBomboclattCardArtUrl('Rizzler Arvin');
+          const handCards = activeView.selfHand ?? [];
+          const pickedUid =
+            selectedRizzCardUid !== null && handCards.some((c) => c.uid === selectedRizzCardUid)
+              ? selectedRizzCardUid
+              : undefined;
           return (
             <motion.div
               initial={{ opacity: 0 }}
@@ -3767,28 +3828,69 @@ export default function App() {
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: 10 }}
                 transition={{ type: 'spring', stiffness: 320, damping: 22 }}
-                className="w-full max-w-md rounded-2xl border-2 p-6 shadow-2xl text-center"
+                className="w-full max-w-md rounded-2xl border-2 p-5 sm:p-6 shadow-2xl text-center"
                 style={{
                   background: 'linear-gradient(160deg, #4c0519 0%, #881337 55%, #be123c 100%)',
                   borderColor: '#fda4af',
                 }}
               >
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/30 border border-[#fda4af]/40 text-[#fecdd3] text-[11px] font-extrabold tracking-widest uppercase mb-3">
+                {rizzArt && (
+                  <div className="mx-auto w-24 h-[136px] rounded-xl overflow-hidden border-2 border-[#fecdd3] shadow-xl mb-3">
+                    <img
+                      src={rizzArt}
+                      alt="Rizzler Arvin"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                )}
+
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/30 border border-[#fda4af]/40 text-[#fecdd3] text-[11px] font-extrabold tracking-widest uppercase mb-2.5">
                   <Heart className="w-3.5 h-3.5 fill-current text-[#fb7185]" />
                   <span>Rizzler Arvin · From {prompt.fromName}</span>
                 </div>
 
                 <h2
                   id="rizz-prompt-title"
-                  className="font-display text-xl sm:text-2xl font-extrabold italic text-white leading-snug mb-3"
+                  className="font-display text-lg sm:text-xl font-extrabold italic text-white leading-snug mb-2.5"
                 >
                   &ldquo;{prompt.line}&rdquo;
                 </h2>
 
-                <p className="text-xs text-[#ffe4e6] mb-5">
-                  Press <strong>👍</strong> to give {prompt.fromName} 1 card from your hand, or{' '}
-                  <strong>👎</strong> to curve &amp; continue.
+                <p className="text-xs text-[#ffe4e6] mb-3">
+                  Choose <strong>👍</strong> to give {prompt.fromName} 1 card from your pile, or{' '}
+                  <strong>👎</strong> to close &amp; continue.
                 </p>
+
+                {handCards.length > 0 && (
+                  <div className="mb-4 text-left bg-black/25 rounded-xl p-2.5 border border-white/10">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#fecdd3] mb-1.5">
+                      Card to gift on 👍 (optional — random if none tapped)
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                      {handCards.map((c) => {
+                        const isSelected = pickedUid === c.uid;
+                        const chipBg = activeTheme.suitHex[c.color];
+                        return (
+                          <button
+                            key={c.uid}
+                            type="button"
+                            onClick={() =>
+                              setSelectedRizzCardUid((prev) => (prev === c.uid ? null : c.uid))
+                            }
+                            className={`px-2 py-1 rounded-md text-[10px] font-extrabold text-white border transition ${
+                              isSelected
+                                ? 'ring-2 ring-white scale-105 border-white'
+                                : 'border-white/30 opacity-85 hover:opacity-100'
+                            }`}
+                            style={{ backgroundColor: chipBg }}
+                          >
+                            {c.color === 'Wild' ? c.value : `${c.color.charAt(0)} ${c.value}`}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <motion.button
@@ -3796,7 +3898,7 @@ export default function App() {
                     whileTap={isBusy ? undefined : { scale: 0.96 }}
                     type="button"
                     disabled={isBusy}
-                    onClick={() => handleRizzPromptChoice(prompt.promptId, true)}
+                    onClick={() => handleRizzPromptChoice(prompt.promptId, true, pickedUid)}
                     className="h-12 rounded-xl bg-[#fff1f2] text-[#9f1239] font-extrabold text-base shadow-lg inline-flex items-center justify-center gap-2 hover:bg-white disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-white"
                   >
                     <ThumbsUp className="w-5 h-5" />

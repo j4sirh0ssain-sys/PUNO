@@ -523,21 +523,10 @@ export function attachMultiplayerServer(
     room: RoomState,
     targetHand: Card[]
   ): { card: Card | null; reshuffled: boolean } {
-    const res = drawOneFromDeck(room.deck, room.discard, targetHand);
-    if (res.reshuffled && room.goonerSurjoUsed) {
-      for (let i = room.deck.length - 1; i >= 0; i--) {
-        if (room.deck[i].value === 'Gooner Surjo') {
-          room.deck.splice(i, 1);
-        }
-      }
-      if (res.card && res.card.value === 'Gooner Surjo') {
-        const idx = targetHand.findIndex((c) => c.uid === res.card!.uid);
-        if (idx !== -1) targetHand.splice(idx, 1);
-        const retry = drawOneFromDeck(room.deck, room.discard, targetHand);
-        return { card: retry.card, reshuffled: res.reshuffled || retry.reshuffled };
-      }
-    }
-    return res;
+    return drawOneFromDeck(room.deck, room.discard, targetHand, {
+      surjoUsed: room.goonerSurjoUsed,
+      surjoDrawChance: room.difficulty === 'bomboclatt' ? 0.05 : 0,
+    });
   }
 
   function handleTurnTimeout(
@@ -723,7 +712,8 @@ export function attachMultiplayerServer(
   function resolveRizzPrompt(
     room: RoomState,
     promptId: string,
-    accept: boolean
+    accept: boolean,
+    chosenCardUid?: number
   ): void {
     const pending = room.pendingRizz;
     if (!pending || pending.promptId !== promptId) return;
@@ -738,7 +728,12 @@ export function attachMultiplayerServer(
     const effects: EffectEvent[] = [];
 
     if (accept && fromSeat && targetSeat && !targetSeat.eliminated && targetSeat.hand.length > 0) {
-      const pickIdx = Math.floor(Math.random() * targetSeat.hand.length);
+      const requestedIdx =
+        typeof chosenCardUid === 'number'
+          ? targetSeat.hand.findIndex((c) => c.uid === chosenCardUid)
+          : -1;
+      const pickIdx =
+        requestedIdx !== -1 ? requestedIdx : Math.floor(Math.random() * targetSeat.hand.length);
       const [gifted] = targetSeat.hand.splice(pickIdx, 1);
       fromSeat.hand.push(gifted);
       effects.push({
@@ -2064,7 +2059,8 @@ export function attachMultiplayerServer(
         return;
       }
       if (!payload?.promptId || payload.promptId !== room.pendingRizz.promptId) return;
-      resolveRizzPrompt(room, payload.promptId, Boolean(payload.accept));
+      const chosenUid = typeof payload.cardUid === 'number' ? payload.cardUid : undefined;
+      resolveRizzPrompt(room, payload.promptId, Boolean(payload.accept), chosenUid);
     });
 
     socket.on('call_uno', () => {

@@ -5,7 +5,7 @@ export type CardColor = SuitColor | 'Wild';
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 10;
 
-export type DifficultyLevel = 'chill' | 'normal' | 'hard' | 'no_mercy' | 'bomboclatt';
+export type DifficultyLevel = 'normal' | 'hard' | 'no_mercy' | 'bomboclatt';
 
 export const BOMBOCLATT_CARD_VALUES = [
   'Rizzler Arvin',
@@ -243,6 +243,7 @@ export interface PlayCardPayload {
 export interface RizzResponsePayload {
   promptId: string;
   accept: boolean;
+  cardUid?: number;
 }
 
 export interface RestartPayload {
