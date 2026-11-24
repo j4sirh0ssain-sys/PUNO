@@ -135,12 +135,27 @@ export interface MultiRoundDeal {
   customGrantSeatIndexes: number[];
 }
 
+export const GOONER_SURJO_SPAWN_CHANCE = 0.03;
+
 export function dealRoundMulti(
   seatNames: string[],
   difficulty: DifficultyLevel = 'normal'
 ): MultiRoundDeal {
   const count = clampPlayerCount(seatNames.length);
   const deck = shuffle(makeDeck(difficulty, count));
+  const hasCustomGrantSeat =
+    difficulty === 'bomboclatt' &&
+    seatNames.slice(0, count).some((name) => name.trim().toLowerCase() === 'j4s1rlol');
+  const includeSurjo =
+    difficulty === 'bomboclatt' &&
+    (hasCustomGrantSeat || Math.random() < GOONER_SURJO_SPAWN_CHANCE);
+  if (!includeSurjo) {
+    for (let i = deck.length - 1; i >= 0; i--) {
+      if (deck[i].value === 'Gooner Surjo') {
+        deck.splice(i, 1);
+      }
+    }
+  }
   const hands: Card[][] = Array.from({ length: count }, () => []);
   const jasirSeatIndexes: number[] = [];
   const customGrantSeatIndexes: number[] = [];

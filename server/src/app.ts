@@ -526,7 +526,7 @@ export function attachMultiplayerServer(
   ): { card: Card | null; reshuffled: boolean } {
     return drawOneFromDeck(room.deck, room.discard, targetHand, {
       surjoUsed: room.goonerSurjoUsed,
-      surjoDrawChance: room.difficulty === 'bomboclatt' ? 0.05 : 0,
+      surjoDrawChance: room.difficulty === 'bomboclatt' ? 0.03 : 0,
     });
   }
 

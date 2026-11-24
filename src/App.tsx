@@ -868,7 +868,7 @@ export default function App() {
   ): { card: Card | null; reshuffled: boolean } => {
     return drawOneFromDeck(s.deck, s.discard, targetHand, {
       surjoUsed: s.goonerSurjoUsed,
-      surjoDrawChance: s.difficulty === 'bomboclatt' ? 0.05 : 0,
+      surjoDrawChance: s.difficulty === 'bomboclatt' ? 0.03 : 0,
     });
   };
 
