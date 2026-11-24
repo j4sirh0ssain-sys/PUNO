@@ -1029,26 +1029,23 @@ export function attachMultiplayerServer(
           recycleHandToDeck(room, targetSeat.hand);
           const remaining = getAliveSeats(room);
           if (remaining.length <= 1) {
-            activeSeat.score += 1;
-            const extraEffs: EffectEvent[] = [];
-            redealKnockedOutSeat(room, targetSeat, extraEffs);
-            room.turnIndex = advanceTurn(room, 1);
-            room.turn = room.turnIndex === 0 ? 'host' : 'guest';
-            const nextSeat = room.seats[room.turnIndex];
-            room.message = `GOONER SURJO! ${targetSeat.name} eliminated & reset (+1 pt ${activeSeat.name}) — fresh 7 cards! ${nextSeat.name}'s turn.`;
-            scheduleCpuIfNeeded(room);
-            broadcastRoom(room, (seatIdx) => [
-              ...perSeatEffects(seatIdx),
-              ...extraEffs,
-              {
-                kind: 'surjo_ko',
-                whoName: activeSeat.name,
-                targetName: targetSeat.name,
-                isSelfLoser: targetSeat.index === seatIdx,
-                seatIndex: activeSeat.index,
-                targetIndex: targetSeat.index,
-              },
-            ]);
+            const survivor = remaining[0] ?? activeSeat;
+            finishRoundWithWinner(
+              room,
+              survivor,
+              `GOONER SURJO! ${targetSeat.name} eliminated — ${survivor.name} wins!`,
+              (seatIdx) => [
+                ...perSeatEffects(seatIdx),
+                {
+                  kind: 'surjo_ko',
+                  whoName: activeSeat.name,
+                  targetName: targetSeat.name,
+                  isSelfLoser: targetSeat.index === seatIdx,
+                  seatIndex: activeSeat.index,
+                  targetIndex: targetSeat.index,
+                },
+              ]
+            );
             return;
           }
           room.turnIndex = advanceTurn(room, 1);

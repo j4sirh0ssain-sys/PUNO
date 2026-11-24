@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import {
   AlertTriangle,
   Clock,
@@ -28,7 +28,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { io, type Socket } from 'socket.io-client';
-import { HomeBackdrop, PunoLogo } from './components/HomeVisuals.tsx';
+import { BackdropPunoCardFace, HomeBackdrop, PunoLogo } from './components/HomeVisuals.tsx';
 import { QrInviteModal } from './components/QrInviteModal.tsx';
 import { PunoCanvasEngine } from './game/canvasRenderer.ts';
 import { buildApiUrl, getSocketServerUrl, wakeBackendServer } from './lib/backend.ts';
@@ -200,7 +200,7 @@ function isThemeId(value: string | null): value is TableThemeId {
 
 interface ShowcaseCardProps {
   theme: TableTheme;
-  suit: 'Blue' | 'Red' | 'Wild';
+  suit: SuitColor | 'Wild';
   label: string;
   rotate: number;
   xOffset: number;
@@ -269,10 +269,10 @@ function ShowcaseCard({
         x: xOffset,
         zIndex,
         backgroundColor: artUrl ? '#0f172a' : theme.cardFrame,
-        borderColor: artUrl ? 'rgba(255,255,255,0.4)' : theme.cardFrameOutline,
+        borderColor: artUrl ? 'rgba(255,255,255,0.45)' : theme.cardFrameOutline,
         boxShadow: design === 'comic' ? '6px 8px 0 rgba(12, 14, 26, 0.85)' : undefined,
       }}
-      className={`absolute w-28 h-40 rounded-xl shadow-2xl border-2 cursor-pointer select-none overflow-hidden ${
+      className={`absolute w-24 h-36 sm:w-26 sm:h-38 rounded-xl shadow-2xl border-2 cursor-pointer select-none overflow-hidden ${
         artUrl ? 'p-0' : 'p-1.5'
       }`}
     >
@@ -280,6 +280,7 @@ function ShowcaseCard({
         <img
           src={artUrl}
           alt={label}
+          referrerPolicy="no-referrer"
           draggable={false}
           className="w-full h-full object-cover"
           style={{
@@ -434,6 +435,7 @@ export default function App() {
   const [inviteDismissed, setInviteDismissed] = useState(false);
   const isGuestInvite = Boolean(inviteRoomParam && inviteTokenParam && !inviteDismissed);
 
+  const prefersReducedMotion = useReducedMotion();
   const [screen, setScreen] = useState<ScreenState>('TITLE_MENU');
   const [mode, setMode] = useState<GameMode>(isGuestInvite ? 'multiplayer' : 'solo');
   const [themeId, setThemeId] = useState<TableThemeId>(() => {
@@ -1347,12 +1349,17 @@ export default function App() {
         });
         const remaining = s.seats.filter((seat) => !seat.eliminated);
         if (remaining.length <= 1) {
-          actor.score += 1;
-          redealKnockedOutSoloSeat(s, targetSeat, effects);
-          const nextIdx = advanceSoloIndex(s, 1);
-          const nextSeat = s.seats[nextIdx];
-          s.message = `GOONER SURJO! ${targetSeat.name} eliminated & reset (+1 pt ${actor.name}) — ${nextSeat.name}'s turn!`;
-          scheduleNextTurn(nextIdx, 1050);
+          const survivor = remaining[0] ?? actor;
+          endSoloRoundWithWinner(
+            s,
+            survivor,
+            expectedRound,
+            `GOONER SURJO! ${targetSeat.name} eliminated!`,
+            survivor.index === 0
+              ? `GOONER SURJO! ${targetSeat.name} eliminated — you win!`
+              : `GOONER SURJO! ${targetSeat.name} eliminated — ${survivor.name} wins!`,
+            effects
+          );
           return true;
         }
         const nextIdx = advanceSoloIndex(s, 1);
@@ -2830,12 +2837,19 @@ export default function App() {
             </span>
           </div>
         ) : (
-          careerWins > 0 && (
-            <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono-tabular text-[#9fb3b0] whitespace-nowrap">
-              <Trophy className="w-3.5 h-3.5" style={{ color: activeTheme.accent }} />
-              <span>{careerWins} {careerWins === 1 ? 'win' : 'wins'}</span>
-            </div>
-          )
+          <div className="hidden sm:flex items-center gap-2 text-xs text-[#9fb3b0] whitespace-nowrap">
+            <span>2–10 Players</span>
+            <span aria-hidden="true">·</span>
+            <span>Solo &amp; QR Multiplayer</span>
+            {careerWins > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono-tabular font-semibold" style={{ color: activeTheme.accent }}>
+                  {careerWins} {careerWins === 1 ? 'win' : 'wins'}
+                </span>
+              </>
+            )}
+          </div>
         )}
 
         <div className="flex items-center gap-2 shrink-0">
@@ -2950,182 +2964,542 @@ export default function App() {
       {/* Main Stage */}
       <main className="relative flex-1 min-h-0 flex flex-col">
         {screen === 'TITLE_MENU' ? (
-          <div className="relative flex-1 flex items-center justify-center px-4 py-6 sm:p-8 overflow-y-auto overflow-x-hidden">
-            <HomeBackdrop theme={activeTheme} />
-            <div className="relative z-10 w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
-              {/* Left Brand & Animated Card Fan */}
-              <div className="hidden lg:flex lg:col-span-5 flex-col items-center text-center">
+          <div className="relative flex-1 flex items-center justify-center px-4 py-6 sm:px-8 sm:py-8 overflow-y-auto overflow-x-hidden">
+            <HomeBackdrop theme={activeTheme} difficulty={difficulty} />
+            <div className="relative z-10 w-full max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
+              {/* Left Stage: Editorial Hero, Live Felt Deck Fan & Rules Ledger */}
+              <div className="hidden lg:flex lg:col-span-6 flex-col items-start text-left pr-2">
                 <PunoLogo theme={activeTheme} size="lg" />
-                <p className="mt-3 text-sm text-[#c7d4d2]">
+
+                <h1 className="mt-5 font-display text-4xl xl:text-[44px] font-extrabold tracking-tight text-[#f4f4ed] leading-[1.1] text-balance max-w-md">
                   {isGuestInvite
-                    ? `Invited to Room ${inviteRoomParam}`
-                    : '2 to 10 players · Solo or QR Room'}
+                    ? `You're invited to Room ${inviteRoomParam}.`
+                    : 'Fast cards, ruthless stacks.'}
+                </h1>
+
+                <p className="mt-2.5 text-[15px] text-[#a9bdbb] leading-relaxed max-w-md">
+                  {isGuestInvite
+                    ? 'Confirm your display name to take your seat at the table.'
+                    : 'Play solo against adaptive bots or host an instant 2–10 player QR room with live turn timers.'}
                 </p>
 
-                <div className="relative w-72 h-72 mt-4 flex items-center justify-center">
-                  <motion.div
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 36, repeat: Infinity, ease: 'linear' }}
-                    className="absolute inset-1 rounded-full border border-dashed opacity-45"
-                    style={{ borderColor: activeTheme.accent }}
-                  />
-                  <motion.div
-                    animate={{ scale: [1, 1.03, 1], opacity: [0.88, 1, 0.88] }}
-                    transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
-                    className="absolute inset-4 rounded-full border-2 shadow-2xl"
+                {/* Felt Arena Turntable */}
+                <div className="relative w-full max-w-[440px] h-[238px] mt-7 flex items-center justify-center">
+                  <div
+                    className="absolute inset-x-2 inset-y-4 rounded-[120px] border-2 shadow-2xl transition-colors duration-300"
                     style={{
-                      background: `radial-gradient(circle at 40% 35%, ${activeTheme.feltCenter}, ${activeTheme.feltEdge})`,
+                      background: `radial-gradient(ellipse at 45% 38%, ${activeTheme.feltCenter}, ${activeTheme.feltEdge})`,
                       borderColor: activeTheme.railTrim,
+                      boxShadow: 'inset 0 0 34px rgba(0,0,0,0.45), 0 20px 44px rgba(0,0,0,0.5)',
                     }}
                   />
+                  <div
+                    className="absolute inset-x-6 inset-y-8 rounded-[105px] border border-dashed opacity-35 pointer-events-none"
+                    style={{ borderColor: activeTheme.accent }}
+                  />
+
                   <AnimatePresence mode="wait">
                     <motion.div
-                      key={`${themeId}-${difficulty === 'bomboclatt' ? 'bm' : difficulty === 'no_mercy' ? 'nm' : 'std'}`}
-                      initial={{ opacity: 0, scale: 0.9 }}
+                      key={`${themeId}-${difficulty}`}
+                      initial={{ opacity: 0, scale: 0.94 }}
                       animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.9 }}
-                      transition={{ duration: 0.2 }}
+                      exit={{ opacity: 0, scale: 0.94 }}
+                      transition={{ duration: 0.18 }}
                       className="relative flex items-center justify-center w-full h-full"
                     >
-                      <ShowcaseCard
-                        theme={activeTheme}
-                        suit="Blue"
-                        label={
-                          difficulty === 'bomboclatt'
-                            ? 'Gooner Surjo'
-                            : difficulty === 'no_mercy'
-                              ? '⊘⊘'
-                              : '7'
-                        }
-                        rotate={-16}
-                        xOffset={-56}
-                        yOffset={10}
-                        zIndex={1}
-                        floatDelay={0}
-                      />
-                      <ShowcaseCard
-                        theme={activeTheme}
-                        suit="Red"
-                        label={
-                          difficulty === 'bomboclatt'
-                            ? 'Rizzler Arvin'
-                            : difficulty === 'no_mercy'
-                              ? 'ALL'
-                              : '+2'
-                        }
-                        rotate={0}
-                        xOffset={0}
-                        yOffset={-8}
-                        zIndex={2}
-                        floatDelay={0.5}
-                      />
-                      <ShowcaseCard
-                        theme={activeTheme}
-                        suit="Wild"
-                        label={
-                          difficulty === 'bomboclatt'
-                            ? 'Rafath Kauwa'
-                            : difficulty === 'no_mercy'
-                              ? '+10'
-                              : '+4'
-                        }
-                        rotate={16}
-                        xOffset={56}
-                        yOffset={10}
-                        zIndex={3}
-                        floatDelay={1.0}
-                      />
+                      {difficulty === 'bomboclatt' ? (
+                        <>
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Blue"
+                            label="Gooner Surjo"
+                            rotate={-17}
+                            xOffset={-88}
+                            yOffset={14}
+                            zIndex={1}
+                            floatDelay={0}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Red"
+                            label="Rizzler Arvin"
+                            rotate={-6}
+                            xOffset={-30}
+                            yOffset={-6}
+                            zIndex={2}
+                            floatDelay={0.35}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Wild"
+                            label="Rafath Kauwa"
+                            rotate={6}
+                            xOffset={30}
+                            yOffset={-6}
+                            zIndex={3}
+                            floatDelay={0.7}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Yellow"
+                            label="Toothpick Alif"
+                            rotate={17}
+                            xOffset={88}
+                            yOffset={14}
+                            zIndex={4}
+                            floatDelay={1.05}
+                          />
+                        </>
+                      ) : difficulty === 'no_mercy' ? (
+                        <>
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Blue"
+                            label="⊘⊘"
+                            rotate={-17}
+                            xOffset={-84}
+                            yOffset={14}
+                            zIndex={1}
+                            floatDelay={0}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Red"
+                            label="+6"
+                            rotate={-6}
+                            xOffset={-28}
+                            yOffset={-6}
+                            zIndex={2}
+                            floatDelay={0.35}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Wild"
+                            label="ALL"
+                            rotate={6}
+                            xOffset={28}
+                            yOffset={-6}
+                            zIndex={3}
+                            floatDelay={0.7}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Yellow"
+                            label="+10"
+                            rotate={17}
+                            xOffset={84}
+                            yOffset={14}
+                            zIndex={4}
+                            floatDelay={1.05}
+                          />
+                        </>
+                      ) : difficulty === 'hard' ? (
+                        <>
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Green"
+                            label="↺"
+                            rotate={-17}
+                            xOffset={-84}
+                            yOffset={14}
+                            zIndex={1}
+                            floatDelay={0}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Red"
+                            label="⊘"
+                            rotate={-6}
+                            xOffset={-28}
+                            yOffset={-6}
+                            zIndex={2}
+                            floatDelay={0.35}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Blue"
+                            label="+2"
+                            rotate={6}
+                            xOffset={28}
+                            yOffset={-6}
+                            zIndex={3}
+                            floatDelay={0.7}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Wild"
+                            label="+4"
+                            rotate={17}
+                            xOffset={84}
+                            yOffset={14}
+                            zIndex={4}
+                            floatDelay={1.05}
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Blue"
+                            label="7"
+                            rotate={-17}
+                            xOffset={-84}
+                            yOffset={14}
+                            zIndex={1}
+                            floatDelay={0}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Red"
+                            label="+2"
+                            rotate={-6}
+                            xOffset={-28}
+                            yOffset={-6}
+                            zIndex={2}
+                            floatDelay={0.35}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Green"
+                            label="★"
+                            rotate={6}
+                            xOffset={28}
+                            yOffset={-6}
+                            zIndex={3}
+                            floatDelay={0.7}
+                          />
+                          <ShowcaseCard
+                            theme={activeTheme}
+                            suit="Wild"
+                            label="+4"
+                            rotate={17}
+                            xOffset={84}
+                            yOffset={14}
+                            zIndex={4}
+                            floatDelay={1.05}
+                          />
+                        </>
+                      )}
                     </motion.div>
                   </AnimatePresence>
                 </div>
+
+                {/* Hairline Mode Rules Ledger */}
+                <div
+                  className="grid grid-cols-3 gap-6 w-full max-w-[440px] mt-5 pt-4 border-t"
+                  style={{ borderColor: `${activeTheme.surfaceBorder}aa` }}
+                >
+                  <div>
+                    <div className="text-[11px] font-medium text-[#8ea5a2]">Hand Limit</div>
+                    <div className="mt-0.5 text-sm font-bold font-mono-tabular text-[#f4f4ed]">
+                      {difficulty === 'bomboclatt'
+                        ? '50 Cards KO'
+                        : difficulty === 'no_mercy'
+                          ? '25 Cards KO'
+                          : 'Unlimited'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-medium text-[#8ea5a2]">Draw Stacking</div>
+                    <div className="mt-0.5 text-sm font-bold font-mono-tabular text-[#f4f4ed]">
+                      {difficulty === 'bomboclatt' || difficulty === 'no_mercy'
+                        ? '+2 to +10'
+                        : 'Classic'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-medium text-[#8ea5a2]">Turn Clock</div>
+                    <div className="mt-0.5 text-sm font-bold font-mono-tabular text-[#f4f4ed]">
+                      25s Online
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              {/* Right Clean Setup Card */}
-              <div className="lg:col-span-7 w-full max-w-md mx-auto lg:max-w-none">
-                <div className="lg:hidden flex flex-col items-center text-center mb-5">
+              {/* Right Console: Match Setup */}
+              <div className="relative lg:col-span-6 w-full max-w-lg mx-auto lg:max-w-none">
+                {/* Animated peeking cards directly behind the Table Setup UI */}
+                <div className="pointer-events-none absolute inset-0 z-0" aria-hidden="true">
+                  <motion.div
+                    initial={{ rotate: -18 }}
+                    animate={
+                      prefersReducedMotion
+                        ? { rotate: -18 }
+                        : { y: [0, -7, 0], rotate: [-18, -13, -18] }
+                    }
+                    transition={{ duration: 4.8, repeat: Infinity, ease: 'easeInOut' }}
+                    className={`hidden sm:block absolute -left-7 -top-7 w-20 h-28 rounded-xl border-2 shadow-2xl opacity-80 will-change-transform ${
+                      difficulty === 'bomboclatt' ? 'p-0 overflow-hidden' : 'p-1'
+                    }`}
+                    style={{
+                      backgroundColor: difficulty === 'bomboclatt' ? '#0f172a' : activeTheme.cardFrame,
+                      borderColor:
+                        difficulty === 'bomboclatt'
+                          ? 'rgba(255,255,255,0.45)'
+                          : activeTheme.cardFrameOutline,
+                    }}
+                  >
+                    <BackdropPunoCardFace
+                      theme={activeTheme}
+                      suit="Red"
+                      label="+2"
+                      artUrl={
+                        difficulty === 'bomboclatt'
+                          ? getBomboclattCardArtUrl('Rizzler Arvin')
+                          : null
+                      }
+                    />
+                  </motion.div>
+
+                  <motion.div
+                    initial={{ rotate: 16 }}
+                    animate={
+                      prefersReducedMotion
+                        ? { rotate: 16 }
+                        : { y: [0, -9, 0], rotate: [16, 21, 16] }
+                    }
+                    transition={{ duration: 5.2, delay: 0.5, repeat: Infinity, ease: 'easeInOut' }}
+                    className={`absolute -right-4 sm:-right-7 -top-6 w-20 h-28 rounded-xl border-2 shadow-2xl opacity-80 will-change-transform ${
+                      difficulty === 'bomboclatt' ? 'p-0 overflow-hidden' : 'p-1'
+                    }`}
+                    style={{
+                      backgroundColor: difficulty === 'bomboclatt' ? '#0f172a' : activeTheme.cardFrame,
+                      borderColor:
+                        difficulty === 'bomboclatt'
+                          ? 'rgba(255,255,255,0.45)'
+                          : activeTheme.cardFrameOutline,
+                    }}
+                  >
+                    <BackdropPunoCardFace
+                      theme={activeTheme}
+                      suit="Wild"
+                      label="+4"
+                      artUrl={
+                        difficulty === 'bomboclatt'
+                          ? getBomboclattCardArtUrl('Rafath Kauwa')
+                          : null
+                      }
+                    />
+                  </motion.div>
+
+                  <motion.div
+                    initial={{ rotate: -14 }}
+                    animate={
+                      prefersReducedMotion
+                        ? { rotate: -14 }
+                        : { y: [0, 7, 0], rotate: [-14, -19, -14] }
+                    }
+                    transition={{ duration: 5.5, delay: 0.9, repeat: Infinity, ease: 'easeInOut' }}
+                    className={`absolute -left-4 sm:-left-6 -bottom-6 w-20 h-28 rounded-xl border-2 shadow-2xl opacity-80 will-change-transform ${
+                      difficulty === 'bomboclatt' ? 'p-0 overflow-hidden' : 'p-1'
+                    }`}
+                    style={{
+                      backgroundColor: difficulty === 'bomboclatt' ? '#0f172a' : activeTheme.cardFrame,
+                      borderColor:
+                        difficulty === 'bomboclatt'
+                          ? 'rgba(255,255,255,0.45)'
+                          : activeTheme.cardFrameOutline,
+                    }}
+                  >
+                    <BackdropPunoCardFace
+                      theme={activeTheme}
+                      suit="Blue"
+                      label="⊘"
+                      artUrl={
+                        difficulty === 'bomboclatt'
+                          ? getBomboclattCardArtUrl('Gooner Surjo')
+                          : null
+                      }
+                    />
+                  </motion.div>
+
+                  <motion.div
+                    initial={{ rotate: 13 }}
+                    animate={
+                      prefersReducedMotion
+                        ? { rotate: 13 }
+                        : { y: [0, 8, 0], rotate: [13, 8, 13] }
+                    }
+                    transition={{ duration: 4.9, delay: 1.3, repeat: Infinity, ease: 'easeInOut' }}
+                    className={`hidden sm:block absolute -right-6 -bottom-6 w-20 h-28 rounded-xl border-2 shadow-2xl opacity-80 will-change-transform ${
+                      difficulty === 'bomboclatt' ? 'p-0 overflow-hidden' : 'p-1'
+                    }`}
+                    style={{
+                      backgroundColor: difficulty === 'bomboclatt' ? '#0f172a' : activeTheme.cardFrame,
+                      borderColor:
+                        difficulty === 'bomboclatt'
+                          ? 'rgba(255,255,255,0.45)'
+                          : activeTheme.cardFrameOutline,
+                    }}
+                  >
+                    <BackdropPunoCardFace
+                      theme={activeTheme}
+                      suit="Yellow"
+                      label="↺"
+                      artUrl={
+                        difficulty === 'bomboclatt'
+                          ? getBomboclattCardArtUrl('Toothpick Alif')
+                          : null
+                      }
+                    />
+                  </motion.div>
+                </div>
+
+                <div className="relative z-10 lg:hidden flex flex-col items-center text-center mb-5">
                   <PunoLogo theme={activeTheme} size="md" />
-                  <p className="mt-2.5 text-xs text-[#c7d4d2]">
+                  <h1 className="mt-3 font-display text-2xl font-extrabold tracking-tight text-[#f4f4ed]">
+                    {isGuestInvite ? `Invited to Room ${inviteRoomParam}` : 'Fast cards, ruthless stacks.'}
+                  </h1>
+                  <p className="mt-1 text-xs text-[#a9bdbb]">
                     {isGuestInvite
-                      ? `Room ${inviteRoomParam} invite`
-                      : '2 to 10 players · Solo or QR Room'}
+                      ? 'Enter your name to join the table'
+                      : '2 to 10 Players · Solo or QR Multiplayer'}
                   </p>
                 </div>
 
                 <motion.div
-                  initial={{ opacity: 0, y: 16 }}
+                  initial={{ opacity: 0, y: 14 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-                  className="w-full rounded-2xl p-6 sm:p-7 shadow-2xl border backdrop-blur-md space-y-5"
+                  transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+                  className="relative z-10 w-full rounded-3xl p-6 sm:p-8 shadow-2xl border backdrop-blur-md"
                   style={{
-                    backgroundColor: `${activeTheme.surface}e8`,
+                    backgroundColor: `${activeTheme.surface}f2`,
                     borderColor: activeTheme.surfaceBorder,
                   }}
                 >
-                  {/* Display Name */}
-                  <div className="relative">
-                    <User className="w-4 h-4 text-[#8ea5a2] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      id="player-name-input"
-                      aria-label="Your display name"
-                      type="text"
-                      maxLength={18}
-                      value={nameDraft}
-                      onChange={(e) => setNameDraft(e.target.value)}
-                      placeholder="Your name"
-                      className="w-full h-11 pl-10 pr-4 rounded-xl bg-black/25 border text-[#f4f4ed] text-sm font-medium placeholder:text-[#7e9491] focus:outline-none focus:border-white/40 transition-colors"
-                      style={{ borderColor: activeTheme.surfaceBorder }}
-                    />
+                  {/* Console Header */}
+                  <div className="flex items-baseline justify-between gap-4 pb-5">
+                    <div>
+                      <h2 className="font-display text-xl font-bold text-[#f4f4ed] tracking-tight">
+                        {isGuestInvite ? 'Join Match' : 'Table Setup'}
+                      </h2>
+                      <p className="text-xs text-[#9fb3b0] mt-0.5">
+                        {isGuestInvite
+                          ? `Room ${inviteRoomParam} is waiting`
+                          : 'Configure seats, ruleset, and felt style'}
+                      </p>
+                    </div>
+                    {!isGuestInvite && (
+                      <span
+                        className="text-xs font-semibold font-mono-tabular whitespace-nowrap"
+                        style={{ color: activeDifficulty.accent }}
+                      >
+                        {activeDifficulty.label} · {playerCount}P
+                      </span>
+                    )}
                   </div>
 
-                  {/* Table Theme (Single Clean Dot Row) */}
-                  <div className="flex items-center justify-between gap-4 py-1">
-                    <div className="text-xs">
-                      <span className="text-[#9fb3b0] font-medium">Table</span>
-                      <span className="mx-1.5 text-[#5b716e]">·</span>
-                      <span className="font-semibold text-[#f4f4ed]">{activeTheme.label}</span>
+                  {/* Player Name & Table Swatch */}
+                  <div
+                    className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-end py-5 border-t"
+                    style={{ borderColor: `${activeTheme.surfaceBorder}99` }}
+                  >
+                    <div className="sm:col-span-7">
+                      <label
+                        htmlFor="player-name-input"
+                        className="block text-xs font-semibold text-[#b8cac8] mb-2"
+                      >
+                        Display Name
+                      </label>
+                      <div className="relative">
+                        <User className="w-4 h-4 text-[#8ea5a2] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          id="player-name-input"
+                          type="text"
+                          maxLength={18}
+                          value={nameDraft}
+                          onChange={(e) => setNameDraft(e.target.value)}
+                          placeholder="Enter your name"
+                          className="w-full h-11 pl-10 pr-3.5 rounded-xl bg-black/30 border text-[#f4f4ed] text-sm font-medium placeholder:text-[#7e9491] focus:outline-none focus:border-white/50 transition-colors"
+                          style={{ borderColor: activeTheme.surfaceBorder }}
+                        />
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2" role="radiogroup" aria-label="Table theme">
-                      {THEME_LIST.map((t) => {
-                        const selected = t.id === themeId;
-                        return (
-                          <button
-                            key={t.id}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            aria-label={t.label}
-                            title={t.label}
-                            onClick={() => selectTheme(t.id)}
-                            className={`w-6 h-6 rounded-full border-2 transition-transform focus-visible:outline-2 focus-visible:outline-white ${
-                              selected ? 'scale-110 shadow-md' : 'opacity-70 hover:opacity-100 hover:scale-105'
-                            }`}
-                            style={{
-                              backgroundColor: t.feltCenter,
-                              borderColor: selected ? t.accent : t.railTrim,
-                              boxShadow: selected ? `0 0 0 2px ${t.accent}44` : undefined,
-                            }}
-                          />
-                        );
-                      })}
+
+                    <div className="sm:col-span-5">
+                      <div className="flex items-center justify-between text-xs mb-2">
+                        <span className="font-semibold text-[#b8cac8]">Felt</span>
+                        <span className="font-medium text-[#f4f4ed]">{activeTheme.label}</span>
+                      </div>
+                      <div
+                        className="h-11 px-3 rounded-xl bg-black/25 border flex items-center justify-between gap-2"
+                        style={{ borderColor: activeTheme.surfaceBorder }}
+                        role="radiogroup"
+                        aria-label="Table theme"
+                      >
+                        {THEME_LIST.map((t) => {
+                          const selected = t.id === themeId;
+                          return (
+                            <button
+                              key={t.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={selected}
+                              aria-label={t.label}
+                              title={t.label}
+                              onClick={() => selectTheme(t.id)}
+                              className={`w-6 h-6 rounded-full border-2 transition-transform focus-visible:outline-2 focus-visible:outline-white ${
+                                selected
+                                  ? 'scale-110 shadow-md'
+                                  : 'opacity-70 hover:opacity-100 hover:scale-105'
+                              }`}
+                              style={{
+                                backgroundColor: t.feltCenter,
+                                borderColor: selected ? t.accent : t.railTrim,
+                                boxShadow: selected ? `0 0 0 2px ${t.accent}44` : undefined,
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
 
-                  {/* Player Count Slider (2-10 Players) */}
+                  {/* Player Count Slider + Quick Seat Presets */}
                   {!isGuestInvite && (() => {
                     const sliderPct = ((playerCount - MIN_PLAYERS) / (MAX_PLAYERS - MIN_PLAYERS)) * 100;
+                    const seatPresets = [2, 4, 6, 10];
                     return (
-                      <div className="pt-1 border-t" style={{ borderColor: `${activeTheme.surfaceBorder}99` }}>
-                        <div className="flex items-center justify-between text-xs pt-4 mb-2.5">
-                          <label htmlFor="player-count-slider" className="font-medium text-[#9fb3b0]">
-                            Players
-                          </label>
-                          <span
-                            className="font-bold font-mono-tabular"
-                            style={{ color: activeTheme.accent }}
-                          >
-                            {playerCount} {playerCount === 2 ? '· 1v1' : `· You + ${playerCount - 1}`}
-                          </span>
+                      <div
+                        className="py-5 border-t"
+                        style={{ borderColor: `${activeTheme.surfaceBorder}99` }}
+                      >
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                          <div className="text-xs">
+                            <label htmlFor="player-count-slider" className="font-semibold text-[#b8cac8]">
+                              Table Seats
+                            </label>
+                            <span className="mx-1.5 text-[#5b716e]">·</span>
+                            <span
+                              className="font-bold font-mono-tabular"
+                              style={{ color: activeTheme.accent }}
+                            >
+                              {playerCount === 2 ? '2 Players (1v1)' : `${playerCount} Players`}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-1 bg-black/25 p-0.5 rounded-lg">
+                            {seatPresets.map((preset) => {
+                              const active = playerCount === preset;
+                              return (
+                                <button
+                                  key={preset}
+                                  type="button"
+                                  onClick={() => selectPlayerCount(preset)}
+                                  className={`px-2.5 h-7 rounded-md text-[11px] font-bold font-mono-tabular transition-colors whitespace-nowrap ${
+                                    active
+                                      ? 'text-[#151c27]'
+                                      : 'text-[#9fb3b0] hover:text-[#f4f4ed]'
+                                  }`}
+                                  style={active ? { backgroundColor: activeTheme.accent } : undefined}
+                                >
+                                  {preset}P
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
+
                         <div className="flex items-center gap-3">
                           <span className="text-[11px] font-mono-tabular text-[#809794] w-3 text-center">
                             {MIN_PLAYERS}
@@ -3155,13 +3529,16 @@ export default function App() {
                     );
                   })()}
 
-                  {/* Difficulty Segmented Control */}
+                  {/* Ruleset / Mode Segmented Control */}
                   {!isGuestInvite && (
-                    <div className="pt-1 border-t" style={{ borderColor: `${activeTheme.surfaceBorder}99` }}>
-                      <div className="flex items-center justify-between text-xs pt-4 mb-2.5">
-                        <span className="font-medium text-[#9fb3b0]">Difficulty</span>
+                    <div
+                      className="py-5 border-t"
+                      style={{ borderColor: `${activeTheme.surfaceBorder}99` }}
+                    >
+                      <div className="flex items-center justify-between text-xs mb-2.5">
+                        <span className="font-semibold text-[#b8cac8]">Ruleset</span>
                         <span
-                          className="font-bold inline-flex items-center gap-1"
+                          className="font-semibold inline-flex items-center gap-1"
                           style={{ color: activeDifficulty.accent }}
                         >
                           {difficulty === 'no_mercy' && <Skull className="w-3.5 h-3.5" />}
@@ -3171,10 +3548,9 @@ export default function App() {
                       </div>
 
                       <div
-                        className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 rounded-xl border bg-black/25"
-                        style={{ borderColor: activeTheme.surfaceBorder }}
+                        className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 rounded-xl bg-black/30"
                         role="radiogroup"
-                        aria-label="Difficulty level"
+                        aria-label="Game mode"
                       >
                         {DIFFICULTY_LIST.map((d) => {
                           const selected = d.id === difficulty;
@@ -3185,8 +3561,10 @@ export default function App() {
                               role="radio"
                               aria-checked={selected}
                               onClick={() => selectDifficulty(d.id)}
-                              className={`h-9 rounded-lg text-[11px] sm:text-xs font-bold transition-all whitespace-nowrap px-2 focus-visible:outline-2 focus-visible:outline-white ${
-                                selected ? 'text-[#10141e] shadow-sm' : 'text-[#b8cac8] hover:text-white'
+                              className={`h-10 rounded-lg text-xs font-bold transition-all whitespace-nowrap px-2 focus-visible:outline-2 focus-visible:outline-white ${
+                                selected
+                                  ? 'text-[#10141e] shadow-sm'
+                                  : 'text-[#b8cac8] hover:text-white'
                               }`}
                               style={selected ? { backgroundColor: d.accent } : undefined}
                             >
@@ -3196,25 +3574,29 @@ export default function App() {
                         })}
                       </div>
 
-                      <p className="mt-2 text-[11px] text-[#9fb3b0] leading-snug">
+                      <p className="mt-2.5 text-xs text-[#9fb3b0] leading-relaxed">
                         {activeDifficulty.summary}
                       </p>
                     </div>
                   )}
 
                   {networkError ? (
-                    <div className="rounded-xl bg-[#ee3f4f]/15 border border-[#ee3f4f]/50 px-4 py-2.5 text-xs text-[#ffb4bc]">
-                      {networkError}
+                    <div className="mb-4 rounded-xl bg-[#ee3f4f]/15 border border-[#ee3f4f]/50 px-4 py-2.5 text-xs text-[#ffb4bc] flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-[#f43f5e]" />
+                      <span>{networkError}</span>
                     </div>
                   ) : mode === 'multiplayer' && (wsStatus === 'connecting' || wsStatus === 'reconnecting') ? (
                     <div
-                      className="rounded-xl border px-4 py-2.5 text-xs text-[#f4f4ed] inline-flex items-center gap-2 w-full"
+                      className="mb-4 rounded-xl border px-4 py-2.5 text-xs text-[#f4f4ed] inline-flex items-center gap-2 w-full"
                       style={{
                         backgroundColor: 'rgba(255,255,255,0.05)',
                         borderColor: activeTheme.surfaceBorder,
                       }}
                     >
-                      <Wifi className="w-3.5 h-3.5 animate-pulse shrink-0" style={{ color: activeTheme.accent }} />
+                      <Wifi
+                        className="w-3.5 h-3.5 animate-pulse shrink-0"
+                        style={{ color: activeTheme.accent }}
+                      />
                       <span>
                         {wsStatus === 'reconnecting'
                           ? 'Connecting to multiplayer server...'
@@ -3223,23 +3605,27 @@ export default function App() {
                     </div>
                   ) : null}
 
-                  {/* Play Actions */}
+                  {/* Primary Action Area */}
                   {isGuestInvite ? (
-                    <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                    <div
+                      className="flex flex-col sm:flex-row gap-3 pt-5 border-t"
+                      style={{ borderColor: `${activeTheme.surfaceBorder}99` }}
+                    >
                       <motion.button
-                        whileHover={{ scale: roomBusy ? 1 : 1.02 }}
-                        whileTap={{ scale: roomBusy ? 1 : 0.98 }}
+                        whileHover={{ scale: roomBusy ? 1 : 1.015 }}
+                        whileTap={{ scale: roomBusy ? 1 : 0.985 }}
                         type="button"
                         disabled={roomBusy}
                         onClick={handleJoinInvite}
-                        className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 disabled:opacity-60 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                        className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 disabled:opacity-60 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white inline-flex items-center justify-center gap-2"
                         style={{ backgroundColor: activeTheme.accent }}
                       >
-                        {roomBusy ? 'Joining Match...' : 'Join Match'}
+                        <Play className="w-4 h-4 fill-current" />
+                        <span>{roomBusy ? 'Joining Match...' : 'Join Match'}</span>
                       </motion.button>
                       <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
+                        whileHover={{ scale: 1.015 }}
+                        whileTap={{ scale: 0.985 }}
                         type="button"
                         onClick={() => {
                           window.history.replaceState({}, '', window.location.pathname);
@@ -3255,71 +3641,80 @@ export default function App() {
                       </motion.button>
                     </div>
                   ) : (
-                    <div className="space-y-3 pt-1">
-                      <div className="flex flex-col sm:flex-row gap-3">
+                    <div
+                      className="space-y-3 pt-5 border-t"
+                      style={{ borderColor: `${activeTheme.surfaceBorder}99` }}
+                    >
+                      <motion.button
+                        whileHover={{ scale: 1.01 }}
+                        whileTap={{ scale: 0.985 }}
+                        type="button"
+                        onClick={() => {
+                          const cleaned = nameDraft.trim() || 'Player';
+                          setPlayerName(cleaned);
+                          try {
+                            localStorage.setItem('puno-player-name', cleaned);
+                          } catch {
+                            // ignore
+                          }
+                          startSoloRound(cleaned, false);
+                        }}
+                        className="w-full h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-92 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white inline-flex items-center justify-center gap-2 shadow-lg"
+                        style={{ backgroundColor: activeTheme.accent }}
+                      >
+                        <Play className="w-4 h-4 fill-current" />
+                        <span>
+                          {playerCount === 2
+                            ? 'Start Solo Match (vs CPU)'
+                            : `Start Solo Match (vs ${playerCount - 1} CPUs)`}
+                        </span>
+                      </motion.button>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
                         <motion.button
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          type="button"
-                          onClick={() => {
-                            const cleaned = nameDraft.trim() || 'Player';
-                            setPlayerName(cleaned);
-                            try {
-                              localStorage.setItem('puno-player-name', cleaned);
-                            } catch {
-                              // ignore
-                            }
-                            startSoloRound(cleaned, false);
-                          }}
-                          className="flex-1 h-12 px-6 rounded-xl text-[#151c27] font-bold text-sm transition-opacity hover:opacity-90 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                          style={{ backgroundColor: activeTheme.accent }}
-                        >
-                          {playerCount === 2 ? 'Play vs CPU' : `Play vs ${playerCount - 1} CPUs`}
-                        </motion.button>
-                        <motion.button
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
+                          whileHover={{ scale: roomBusy ? 1 : 1.01 }}
+                          whileTap={{ scale: roomBusy ? 1 : 0.985 }}
                           type="button"
                           disabled={roomBusy}
                           onClick={handleHostMultiplayer}
-                          className="h-12 inline-flex items-center justify-center gap-2 px-5 rounded-xl disabled:opacity-50 text-[#f4f4ed] border font-semibold text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
+                          className="sm:col-span-5 h-11 inline-flex items-center justify-center gap-2 px-4 rounded-xl disabled:opacity-50 text-[#f4f4ed] border font-semibold text-xs sm:text-sm transition-colors hover:bg-white/5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
                           style={{
                             backgroundColor: 'rgba(255,255,255,0.04)',
                             borderColor: activeTheme.surfaceBorder,
                           }}
                         >
-                          <Users className="w-4 h-4" style={{ color: activeTheme.accent }} />
+                          <Users className="w-4 h-4 shrink-0" style={{ color: activeTheme.accent }} />
                           <span>{roomBusy ? 'Creating...' : `Create ${playerCount}P Room`}</span>
                         </motion.button>
-                      </div>
 
-                      <form onSubmit={handleJoinByCode} className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          maxLength={10}
-                          value={joinCodeDraft}
-                          onChange={(e) =>
-                            setJoinCodeDraft(
-                              e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')
-                            )
-                          }
-                          placeholder="Room code (e.g. K7M9P2)"
-                          aria-label="Enter room code to join"
-                          className="flex-1 h-10 px-3.5 rounded-xl bg-black/25 border text-[#f4f4ed] text-xs font-mono-tabular tracking-[0.14em] uppercase placeholder:tracking-normal placeholder:normal-case placeholder:font-sans placeholder:text-[#7e9491] focus:outline-none focus:border-white/40 transition-colors"
-                          style={{ borderColor: activeTheme.surfaceBorder }}
-                        />
-                        <button
-                          type="submit"
-                          disabled={roomBusy || joinCodeDraft.trim().length < 4}
-                          className="h-10 px-4 rounded-xl text-xs font-bold text-[#f4f4ed] border disabled:opacity-45 hover:bg-white/10 transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white"
-                          style={{
-                            backgroundColor: 'rgba(255,255,255,0.06)',
-                            borderColor: activeTheme.surfaceBorder,
-                          }}
-                        >
-                          {roomBusy ? 'Joining...' : 'Join Code'}
-                        </button>
-                      </form>
+                        <form onSubmit={handleJoinByCode} className="sm:col-span-7 flex items-center gap-2">
+                          <input
+                            type="text"
+                            maxLength={10}
+                            value={joinCodeDraft}
+                            onChange={(e) =>
+                              setJoinCodeDraft(
+                                e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')
+                              )
+                            }
+                            placeholder="Room code"
+                            aria-label="Enter room code to join"
+                            className="flex-1 min-w-0 h-11 px-3.5 rounded-xl bg-black/30 border text-[#f4f4ed] text-xs font-mono-tabular tracking-[0.14em] uppercase placeholder:tracking-normal placeholder:normal-case placeholder:font-sans placeholder:text-[#7e9491] focus:outline-none focus:border-white/50 transition-colors"
+                            style={{ borderColor: activeTheme.surfaceBorder }}
+                          />
+                          <button
+                            type="submit"
+                            disabled={roomBusy || joinCodeDraft.trim().length < 4}
+                            className="h-11 px-4 rounded-xl text-xs font-bold text-[#f4f4ed] border disabled:opacity-45 hover:bg-white/10 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-white"
+                            style={{
+                              backgroundColor: 'rgba(255,255,255,0.06)',
+                              borderColor: activeTheme.surfaceBorder,
+                            }}
+                          >
+                            {roomBusy ? 'Joining...' : 'Join'}
+                          </button>
+                        </form>
+                      </div>
                     </div>
                   )}
                 </motion.div>

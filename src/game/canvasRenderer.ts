@@ -237,6 +237,19 @@ interface DustMote {
   ph: number;
 }
 
+interface AmbientRoomCard {
+  fx: number;
+  fy: number;
+  vx: number;
+  vy: number;
+  rot: number;
+  vr: number;
+  scale: number;
+  ph: number;
+  color: SuitColor;
+  alpha: number;
+}
+
 export type CanvasHit =
   | { type: 'card'; index: number; uid: number }
   | { type: 'deck' }
@@ -301,6 +314,7 @@ export class PunoCanvasEngine {
   private banners: Banner[] = [];
   private bokeh: BokehOrb[];
   private motes: DustMote[];
+  private ambientCards: AmbientRoomCard[];
 
   private view: ClientGameView | null = null;
   private lastRoundId = -1;
@@ -364,6 +378,19 @@ export class PunoCanvasEngine {
       vx: (rand() - 0.5) * 0.016,
       vy: -0.008 - rand() * 0.015,
       ph: rand() * Math.PI * 2,
+    }));
+
+    this.ambientCards = Array.from({ length: 8 }, (_, idx) => ({
+      fx: rand(),
+      fy: rand(),
+      vx: (rand() - 0.5) * 0.007,
+      vy: -0.006 - rand() * 0.008,
+      rot: (rand() - 0.5) * 0.9,
+      vr: (rand() - 0.5) * 0.06,
+      scale: 0.42 + rand() * 0.24,
+      ph: rand() * Math.PI * 2,
+      color: COLORS[idx % COLORS.length],
+      alpha: 0.055 + rand() * 0.045,
     }));
 
     this.buildFeltPattern();
@@ -1496,6 +1523,11 @@ export class PunoCanvasEngine {
         m.fx = (m.fx + m.vx * dt + 1) % 1;
         m.fy = (m.fy + m.vy * dt + 1) % 1;
       }
+      for (const ac of this.ambientCards) {
+        ac.fx = (ac.fx + ac.vx * dt + 1) % 1;
+        ac.fy = (ac.fy + ac.vy * dt + 1) % 1;
+        ac.rot += ac.vr * dt;
+      }
     }
 
     const [dx, dy] = this.deckPos();
@@ -1712,13 +1744,20 @@ export class PunoCanvasEngine {
     }
 
     for (const b of this.bokeh) {
-      const bx = this.width * b.fx + Math.sin(this.t * b.sp + b.ph) * 44;
-      const by = this.height * b.fy + Math.cos(this.t * b.sp * 0.8 + b.ph) * 32;
-      ctx.fillStyle = mixHex(th.bgMid, th.suitHex[b.color], 0.06);
+      const bx = this.width * b.fx + Math.sin(this.t * b.sp + b.ph) * 48;
+      const by = this.height * b.fy + Math.cos(this.t * b.sp * 0.8 + b.ph) * 34;
+      const [cr, cg, cb] = hexToRgb(th.suitHex[b.color]);
+      const grad = ctx.createRadialGradient(bx, by, 0, bx, by, b.r * 1.25);
+      grad.addColorStop(0, `rgba(${cr}, ${cg}, ${cb}, 0.12)`);
+      grad.addColorStop(0.55, `rgba(${cr}, ${cg}, ${cb}, 0.05)`);
+      grad.addColorStop(1, `rgba(${cr}, ${cg}, ${cb}, 0)`);
+      ctx.fillStyle = grad;
       ctx.beginPath();
-      ctx.arc(bx, by, b.r, 0, Math.PI * 2);
+      ctx.arc(bx, by, b.r * 1.25, 0, Math.PI * 2);
       ctx.fill();
     }
+
+    this.drawAmbientRoomCards(ctx);
 
     if (this.shake > 0.5) {
       const sx = Math.sin(this.t * 48) * this.shake;
@@ -1746,6 +1785,43 @@ export class PunoCanvasEngine {
       ctx.beginPath();
       ctx.arc(m.fx * this.width, m.fy * this.height, m.r, 0, Math.PI * 2);
       ctx.fill();
+    }
+  }
+
+  private drawAmbientRoomCards(ctx: CanvasRenderingContext2D): void {
+    if (this.reducedMotion) return;
+    const th = this.theme;
+    const w = BASE_W;
+    const h = BASE_H;
+    const r = 10;
+    for (const ac of this.ambientCards) {
+      const x = ac.fx * this.width;
+      const y = ac.fy * this.height;
+      const breathe = 0.8 + 0.25 * Math.sin(this.t * 0.9 + ac.ph);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(ac.rot + Math.sin(this.t * 0.55 + ac.ph) * 0.12);
+      ctx.scale(ac.scale, ac.scale);
+      ctx.globalAlpha = ac.alpha * breathe;
+      ctx.fillStyle = '#111824';
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(-w / 2, -h / 2, w, h, r);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = th.suitHex[ac.color];
+      ctx.beginPath();
+      ctx.roundRect(-w / 2 + 5, -h / 2 + 5, w - 10, h - 10, 6);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.42)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, w * 0.3, h * 0.2, -0.35, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
