@@ -18,6 +18,7 @@ import {
   isNoMercyRuleset,
   isSuitColor,
   shouldCpuCallUno,
+  shuffle,
 } from './game/engine.ts';
 import {
   POWER_CARD_VALUES,
@@ -659,6 +660,29 @@ export function attachMultiplayerServer(
     });
   }
 
+  function redealKnockedOutSeat(
+    room: RoomState,
+    seat: ServerSeat,
+    effects: EffectEvent[]
+  ): void {
+    seat.eliminated = false;
+    seat.unoArmed = false;
+    shuffle(room.deck);
+    let reshuffledAny = false;
+    let drawn = 0;
+    for (let i = 0; i < 7; i++) {
+      const res = drawWithUniqueSurjoGuard(room, seat.hand);
+      if (res.reshuffled) reshuffledAny = true;
+      if (res.card) drawn++;
+    }
+    if (reshuffledAny) {
+      effects.push({ kind: 'reshuffle' });
+    }
+    if (drawn > 0) {
+      effects.push({ kind: 'seat_draw', seatIndex: seat.index, count: drawn });
+    }
+  }
+
   function handleMercyKnockout(
     room: RoomState,
     loserSeat: ServerSeat,
@@ -672,21 +696,30 @@ export function attachMultiplayerServer(
     recycleHandToDeck(room, loserSeat.hand);
     const alive = getAliveSeats(room);
     if (alive.length <= 1) {
-      const survivor = alive[0] ?? room.seats[0];
-      finishRoundWithWinner(
-        room,
-        survivor,
-        `KNOCKOUT! ${loserSeat.name} hit ${limit}+ cards — ${survivor.name} wins!`,
-        (seatIdx) => [
-          ...baseEffects,
-          {
-            kind: 'mercy_ko',
-            loserName: loserSeat.name,
-            isSelfLoser: loserSeat.index === seatIdx,
-            seatIndex: loserSeat.index,
-          },
-        ]
-      );
+      const survivor =
+        alive[0] ?? room.seats.find((s) => s.index !== loserSeat.index) ?? room.seats[0];
+      survivor.score += 1;
+      const effs: EffectEvent[] = [...baseEffects];
+      redealKnockedOutSeat(room, loserSeat, effs);
+      room.pendingDrawStack = 0;
+      room.pendingDrawMin = 0;
+      room.drawnUid = null;
+      if (room.turnIndex === loserSeat.index) {
+        room.turnIndex = advanceTurn(room, 1);
+      }
+      room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+      const nextSeat = room.seats[room.turnIndex];
+      room.message = `MERCY RESET! ${loserSeat.name} hit ${limit}+ cards (+1 pt ${survivor.name}) — fresh 7 cards! ${nextSeat.name}'s turn.`;
+      scheduleCpuIfNeeded(room);
+      broadcastRoom(room, (seatIdx) => [
+        ...effs,
+        {
+          kind: 'mercy_ko',
+          loserName: loserSeat.name,
+          isSelfLoser: loserSeat.index === seatIdx,
+          seatIndex: loserSeat.index,
+        },
+      ]);
       return true;
     }
 
@@ -996,23 +1029,26 @@ export function attachMultiplayerServer(
           recycleHandToDeck(room, targetSeat.hand);
           const remaining = getAliveSeats(room);
           if (remaining.length <= 1) {
-            const survivor = remaining[0] ?? activeSeat;
-            finishRoundWithWinner(
-              room,
-              survivor,
-              `GOONER SURJO! ${targetSeat.name} was eliminated — ${survivor.name} wins!`,
-              (seatIdx) => [
-                ...perSeatEffects(seatIdx),
-                {
-                  kind: 'surjo_ko',
-                  whoName: activeSeat.name,
-                  targetName: targetSeat.name,
-                  isSelfLoser: targetSeat.index === seatIdx,
-                  seatIndex: activeSeat.index,
-                  targetIndex: targetSeat.index,
-                },
-              ]
-            );
+            activeSeat.score += 1;
+            const extraEffs: EffectEvent[] = [];
+            redealKnockedOutSeat(room, targetSeat, extraEffs);
+            room.turnIndex = advanceTurn(room, 1);
+            room.turn = room.turnIndex === 0 ? 'host' : 'guest';
+            const nextSeat = room.seats[room.turnIndex];
+            room.message = `GOONER SURJO! ${targetSeat.name} eliminated & reset (+1 pt ${activeSeat.name}) — fresh 7 cards! ${nextSeat.name}'s turn.`;
+            scheduleCpuIfNeeded(room);
+            broadcastRoom(room, (seatIdx) => [
+              ...perSeatEffects(seatIdx),
+              ...extraEffs,
+              {
+                kind: 'surjo_ko',
+                whoName: activeSeat.name,
+                targetName: targetSeat.name,
+                isSelfLoser: targetSeat.index === seatIdx,
+                seatIndex: activeSeat.index,
+                targetIndex: targetSeat.index,
+              },
+            ]);
             return;
           }
           room.turnIndex = advanceTurn(room, 1);

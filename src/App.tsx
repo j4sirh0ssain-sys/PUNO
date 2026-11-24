@@ -46,6 +46,7 @@ import {
   isDifficultyLevel,
   isNoMercyRuleset,
   shouldCpuCallUno,
+  shuffle,
 } from './game/engine.ts';
 import { soundFx } from './game/sound.ts';
 import { TABLE_THEMES, THEME_LIST, type TableTheme, type TableThemeId } from './game/themes.ts';
@@ -918,6 +919,29 @@ export default function App() {
     });
   };
 
+  const redealKnockedOutSoloSeat = (
+    s: SoloInternalState,
+    seat: SoloSeat,
+    effects: EffectEvent[]
+  ): void => {
+    seat.eliminated = false;
+    seat.unoArmed = false;
+    shuffle(s.deck);
+    let reshuffledAny = false;
+    let drawn = 0;
+    for (let i = 0; i < 7; i++) {
+      const res = drawSoloOne(s, seat.hand);
+      if (res.reshuffled) reshuffledAny = true;
+      if (res.card) drawn++;
+    }
+    if (reshuffledAny) {
+      effects.push({ kind: 'reshuffle' });
+    }
+    if (drawn > 0) {
+      effects.push({ kind: 'seat_draw', seatIndex: seat.index, count: drawn });
+    }
+  };
+
   const triggerSoloMercyKo = (
     s: SoloInternalState,
     loserSeat: SoloSeat,
@@ -937,22 +961,38 @@ export default function App() {
       { kind: 'mercy_ko', loserName: loserSeat.name, isSelfLoser, seatIndex: loserSeat.index },
     ];
 
-    if (alive.length <= 1 || isSelfLoser) {
-      const winnerSeat = isSelfLoser ? alive[0] ?? s.seats[1] : alive[0] ?? s.seats[0];
-      endSoloRoundWithWinner(
-        s,
-        winnerSeat,
-        expectedRound,
-        `MERCY KO! ${loserSeat.name} reached ${limit}+ cards!`,
-        `${winnerSeat.name} wins by Mercy Rule KO!`,
-        koEffects
-      );
+    if (alive.length <= 1) {
+      const survivor =
+        alive[0] ?? s.seats.find((seat) => seat.index !== loserSeat.index) ?? s.seats[0];
+      survivor.score += 1;
+      redealKnockedOutSoloSeat(s, loserSeat, koEffects);
+      s.pendingDrawStack = 0;
+      s.pendingDrawMin = 0;
+      s.drawnUid = null;
+      const nextIdx = s.turnIndex === loserSeat.index ? advanceSoloIndex(s, 1) : s.turnIndex;
+      s.turn = 'busy';
+      s.message = `MERCY RESET! ${loserSeat.name} hit ${limit}+ cards (+1 pt ${survivor.name}) — fresh 7 cards!`;
+      syncSoloToView(koEffects);
+      scheduleSolo(950, () => {
+        const st = soloRef.current;
+        if (!st || st.roundId !== expectedRound || st.winner) return;
+        st.turnIndex = nextIdx;
+        const nextSeat = st.seats[nextIdx];
+        st.turn = nextIdx === 0 ? 'host' : 'guest';
+        st.message = `${nextSeat.name}'s turn (${st.currentColor}).`;
+        syncSoloToView();
+        if (nextSeat.isCpu) {
+          scheduleSolo(700, () => runCpuTurn(expectedRound));
+        }
+      });
       return true;
     }
 
     const nextIdx = s.turnIndex === loserSeat.index ? advanceSoloIndex(s, 1) : s.turnIndex;
     s.turn = 'busy';
-    s.message = `MERCY KO! ${loserSeat.name} knocked out!`;
+    s.message = isSelfLoser
+      ? `MERCY KO! You hit ${limit}+ cards — spectating remaining players.`
+      : `MERCY KO! ${loserSeat.name} knocked out!`;
     syncSoloToView(koEffects);
     scheduleSolo(900, () => {
       const st = soloRef.current;
@@ -1306,21 +1346,21 @@ export default function App() {
           targetIndex: targetSeat.index,
         });
         const remaining = s.seats.filter((seat) => !seat.eliminated);
-        if (remaining.length <= 1 || targetSeat.index === 0) {
-          const winnerSeat = targetSeat.index === 0 ? remaining[0] ?? actor : remaining[0] ?? actor;
-          endSoloRoundWithWinner(
-            s,
-            winnerSeat,
-            expectedRound,
-            `GOONER SURJO! ${targetSeat.name} eliminated!`,
-            `${winnerSeat.name} wins after Gooner Surjo eliminated ${targetSeat.name}!`,
-            effects
-          );
+        if (remaining.length <= 1) {
+          actor.score += 1;
+          redealKnockedOutSoloSeat(s, targetSeat, effects);
+          const nextIdx = advanceSoloIndex(s, 1);
+          const nextSeat = s.seats[nextIdx];
+          s.message = `GOONER SURJO! ${targetSeat.name} eliminated & reset (+1 pt ${actor.name}) — ${nextSeat.name}'s turn!`;
+          scheduleNextTurn(nextIdx, 1050);
           return true;
         }
         const nextIdx = advanceSoloIndex(s, 1);
         const nextSeat = s.seats[nextIdx];
-        s.message = `GOONER SURJO! ${targetSeat.name} eliminated! ${nextSeat.name}'s turn.`;
+        s.message =
+          targetSeat.index === 0
+            ? `GOONER SURJO! You were eliminated — spectating remaining players! ${nextSeat.name}'s turn.`
+            : `GOONER SURJO! ${targetSeat.name} eliminated! ${nextSeat.name}'s turn.`;
         scheduleNextTurn(nextIdx, 1050);
         return true;
       }
@@ -2226,6 +2266,7 @@ export default function App() {
   const handleCallUno = useCallback(() => {
     const view = activeView;
     if (!view || view.turn !== view.selfRole || pendingWildUid !== null) return;
+    if (view.seats[view.selfIndex]?.eliminated) return;
     if (view.selfHand.length < 2 || view.selfUnoArmed) return;
 
     if (mode === 'multiplayer') {
@@ -2245,6 +2286,7 @@ export default function App() {
   const handleDrawOrPass = useCallback(() => {
     const view = activeView;
     if (!view || view.turn !== view.selfRole || pendingWildUid !== null) return;
+    if (view.seats[view.selfIndex]?.eliminated) return;
 
     if (mode === 'multiplayer') {
       if (view.drawnUid !== null && view.pendingDrawStack === 0) {
@@ -2333,6 +2375,7 @@ export default function App() {
     (uid: number) => {
       const view = activeView;
       if (!view || view.turn !== view.selfRole || pendingWildUid !== null) return;
+      if (view.seats[view.selfIndex]?.eliminated) return;
       const card = view.selfHand.find((c) => c.uid === uid);
       if (!card) return;
 
@@ -3471,13 +3514,16 @@ export default function App() {
                 );
               }
 
+              const selfEliminated = Boolean(activeView.seats[activeView.selfIndex]?.eliminated);
               const hasStack = activeView.pendingDrawStack > 0;
               const mustCallUno =
+                !selfEliminated &&
                 isMyTurn &&
                 activeView.selfHand.length === 2 &&
                 !activeView.selfUnoArmed &&
                 !hasStack;
               const canPressUno =
+                !selfEliminated &&
                 isMyTurn &&
                 pendingWildUid === null &&
                 !activeView.selfUnoArmed &&
@@ -3497,37 +3543,59 @@ export default function App() {
                     style={hudTop !== null ? { top: `${hudTop}px` } : undefined}
                   >
                     <div className="pointer-events-auto flex items-center justify-center gap-2">
-                      <motion.button
-                        whileHover={isMyTurn ? { scale: 1.04 } : undefined}
-                        whileTap={isMyTurn ? { scale: 0.96 } : undefined}
-                        type="button"
-                        disabled={!isMyTurn || pendingWildUid !== null}
-                        onClick={handleDrawOrPass}
-                        className={`h-9 sm:h-10 px-5 rounded-xl text-xs sm:text-sm font-bold transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white inline-flex items-center gap-1.5 ${
-                          isMyTurn
-                            ? hasStack
-                              ? 'text-white shadow-lg'
-                              : 'text-[#151c27] shadow-lg'
-                            : 'text-[#7f9391] border cursor-default'
-                        }`}
-                        style={
-                          isMyTurn
-                            ? { backgroundColor: hasStack ? '#f43f5e' : activeTheme.accent }
-                            : {
-                                backgroundColor: `${activeTheme.surface}d9`,
-                                borderColor: activeTheme.surfaceBorder,
-                              }
-                        }
-                      >
-                        {hasStack && <AlertTriangle className="w-4 h-4" />}
-                        <span>
-                          {hasStack
-                            ? `Take +${activeView.pendingDrawStack} Cards`
-                            : activeView.drawnUid !== null
-                              ? 'Pass Turn'
-                              : 'Draw a Card'}
-                        </span>
-                      </motion.button>
+                      {selfEliminated ? (
+                        <div className="flex items-center gap-2">
+                          <div className="h-9 sm:h-10 px-4 rounded-xl border border-[#f43f5e]/50 bg-[#881337]/80 text-[#ffe4e6] text-xs sm:text-sm font-bold inline-flex items-center gap-1.5 shadow-lg backdrop-blur-sm">
+                            <Skull className="w-4 h-4 text-[#fda4af]" />
+                            <span>Eliminated · Spectating</span>
+                          </div>
+                          {mode === 'solo' && (
+                            <motion.button
+                              whileHover={{ scale: 1.04 }}
+                              whileTap={{ scale: 0.96 }}
+                              type="button"
+                              onClick={() => startSoloRound(undefined, true)}
+                              className="h-9 sm:h-10 px-4 rounded-xl text-xs sm:text-sm font-bold text-[#151c27] shadow-lg inline-flex items-center gap-1.5"
+                              style={{ backgroundColor: activeTheme.accent }}
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>New Match</span>
+                            </motion.button>
+                          )}
+                        </div>
+                      ) : (
+                        <motion.button
+                          whileHover={isMyTurn ? { scale: 1.04 } : undefined}
+                          whileTap={isMyTurn ? { scale: 0.96 } : undefined}
+                          type="button"
+                          disabled={!isMyTurn || pendingWildUid !== null}
+                          onClick={handleDrawOrPass}
+                          className={`h-9 sm:h-10 px-5 rounded-xl text-xs sm:text-sm font-bold transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white inline-flex items-center gap-1.5 ${
+                            isMyTurn
+                              ? hasStack
+                                ? 'text-white shadow-lg'
+                                : 'text-[#151c27] shadow-lg'
+                              : 'text-[#7f9391] border cursor-default'
+                          }`}
+                          style={
+                            isMyTurn
+                              ? { backgroundColor: hasStack ? '#f43f5e' : activeTheme.accent }
+                              : {
+                                  backgroundColor: `${activeTheme.surface}d9`,
+                                  borderColor: activeTheme.surfaceBorder,
+                                }
+                          }
+                        >
+                          {hasStack && <AlertTriangle className="w-4 h-4" />}
+                          <span>
+                            {hasStack
+                              ? `Take +${activeView.pendingDrawStack} Cards`
+                              : activeView.drawnUid !== null
+                                ? 'Pass Turn'
+                                : 'Draw a Card'}
+                          </span>
+                        </motion.button>
+                      )}
 
                       {mode === 'multiplayer' && turnSecondsLeft !== null && (
                         <div
