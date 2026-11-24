@@ -1126,13 +1126,17 @@ export function attachMultiplayerServer(
     } else if (drawAmount > 0) {
       if (isNoMercyRuleset(room.difficulty)) {
         room.pendingDrawStack += drawAmount;
-        room.pendingDrawMin = drawAmount;
+        room.pendingDrawMin = room.difficulty === 'bomboclatt' ? 2 : drawAmount;
         room.turnIndex = advanceTurn(room, 1);
         room.turn = room.turnIndex === 0 ? 'host' : 'guest';
         const targetSeat = room.seats[room.turnIndex];
         room.message = penalizedUno
-          ? `${activeSeat.name} forgot UNO (+2)! ${targetSeat.name}: stack +${drawAmount}+ or take ${room.pendingDrawStack}!`
-          : `${targetSeat.name}: stack a +${drawAmount}+ card or take +${room.pendingDrawStack}!`;
+          ? `${activeSeat.name} forgot UNO (+2)! ${targetSeat.name}: ${
+              room.difficulty === 'bomboclatt' ? 'stack any + card' : `stack +${drawAmount}+`
+            } or take ${room.pendingDrawStack}!`
+          : `${targetSeat.name}: ${
+              room.difficulty === 'bomboclatt' ? 'stack any + card' : `stack a +${drawAmount}+ card`
+            } or take +${room.pendingDrawStack}!`;
       } else {
         const victimIndex = advanceTurn(room, 1);
         const victimSeat = room.seats[victimIndex];
@@ -2245,11 +2249,13 @@ export function attachMultiplayerServer(
         return;
       }
       const top = room.discard[room.discard.length - 1];
-      if (!canPlayCard(card, top, room.currentColor, room.pendingDrawMin)) {
+      if (!canPlayCard(card, top, room.currentColor, room.pendingDrawMin, room.difficulty)) {
         sendError(
           socket,
           room.pendingDrawMin > 0
-            ? `Stack a +${room.pendingDrawMin} or higher card, or take +${room.pendingDrawStack}!`
+            ? room.difficulty === 'bomboclatt'
+              ? `Stack any + card, or take +${room.pendingDrawStack}!`
+              : `Stack a +${room.pendingDrawMin} or higher card, or take +${room.pendingDrawStack}!`
             : 'That card does not match the active color or value.'
         );
         return;

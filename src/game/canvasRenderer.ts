@@ -1467,7 +1467,13 @@ export class PunoCanvasEngine {
       const playable =
         isMyTurn &&
         (this.view!.drawnUid === null || card.uid === this.view!.drawnUid) &&
-        canPlayCard(card, topCard, this.view!.currentColor, this.view!.pendingDrawMin);
+        canPlayCard(
+          card,
+          topCard,
+          this.view!.currentColor,
+          this.view!.pendingDrawMin,
+          this.view!.difficulty
+        );
 
       const breath = playable && !this.reducedMotion ? Math.sin(this.t * 3.8 + i * 0.55) * 4.2 : 0;
 
@@ -2091,7 +2097,7 @@ export class PunoCanvasEngine {
       Boolean(isMyTurn) &&
       view!.drawnUid === null &&
       !view!.selfHand.some((c) =>
-        canPlayCard(c, topCard, view!.currentColor, view!.pendingDrawMin)
+        canPlayCard(c, topCard, view!.currentColor, view!.pendingDrawMin, view!.difficulty)
       );
 
     if (mustDraw && !this.reducedMotion) {

@@ -1531,10 +1531,13 @@ export default function App() {
       if (drawAmount > 0) {
         if (isNoMercyRuleset(s.difficulty)) {
           s.pendingDrawStack += drawAmount;
-          s.pendingDrawMin = drawAmount;
+          s.pendingDrawMin = s.difficulty === 'bomboclatt' ? 2 : drawAmount;
           const nextIdx = advanceSoloIndex(s, 1);
           const nextSeat = s.seats[nextIdx];
-          s.message = `${cpuSeat.name} stacked ${card.value}! ${nextSeat.name}: stack +${drawAmount}+ or take +${s.pendingDrawStack}.`;
+          s.message =
+            s.difficulty === 'bomboclatt'
+              ? `${cpuSeat.name} stacked ${card.value}! ${nextSeat.name}: stack any + card or take +${s.pendingDrawStack}.`
+              : `${cpuSeat.name} stacked ${card.value}! ${nextSeat.name}: stack +${drawAmount}+ or take +${s.pendingDrawStack}.`;
           scheduleNextTurn(nextIdx, 750);
         } else {
           const victimIdx = advanceSoloIndex(s, 1);
@@ -1728,7 +1731,7 @@ export default function App() {
       if (drawAmount > 0) {
         if (isNoMercyRuleset(s.difficulty)) {
           s.pendingDrawStack += drawAmount;
-          s.pendingDrawMin = drawAmount;
+          s.pendingDrawMin = s.difficulty === 'bomboclatt' ? 2 : drawAmount;
           const nextIdx = advanceSoloIndex(s, 1);
           const nextSeat = s.seats[nextIdx];
           s.message = penalizedUno
@@ -2397,13 +2400,15 @@ export default function App() {
       }
 
       const top = view.discardPile[view.discardPile.length - 1];
-      if (!canPlayCard(card, top, view.currentColor, view.pendingDrawMin)) {
+      if (!canPlayCard(card, top, view.currentColor, view.pendingDrawMin, view.difficulty)) {
         engineRef.current?.wiggleCard(uid);
         soundFx.playError();
         if (mode === 'solo' && soloRef.current) {
           soloRef.current.message =
             view.pendingDrawMin > 0
-              ? `Stack a +${view.pendingDrawMin} or higher card, or take +${view.pendingDrawStack}!`
+              ? view.difficulty === 'bomboclatt'
+                ? `Stack any + card, or take +${view.pendingDrawStack}!`
+                : `Stack a +${view.pendingDrawMin} or higher card, or take +${view.pendingDrawStack}!`
               : "That card doesn't match the color or number.";
           syncSoloToView();
         }

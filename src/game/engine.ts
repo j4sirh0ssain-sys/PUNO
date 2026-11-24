@@ -109,9 +109,13 @@ export function canPlayCard(
   card: Card,
   topCard: Card | undefined,
   currentColor: SuitColor,
-  pendingDrawMin = 0
+  pendingDrawMin = 0,
+  difficulty?: DifficultyLevel
 ): boolean {
   if (pendingDrawMin > 0) {
+    if (difficulty === 'bomboclatt') {
+      return getDrawAmount(card) > 0;
+    }
     return getDrawAmount(card) >= pendingDrawMin;
   }
   if (!topCard) return true;
@@ -355,7 +359,9 @@ export function chooseCpuCard(
   pendingDrawMin = 0,
   opponentCount = 7
 ): Card | null {
-  const valid = cpuHand.filter((c) => canPlayCard(c, topCard, currentColor, pendingDrawMin));
+  const valid = cpuHand.filter((c) =>
+    canPlayCard(c, topCard, currentColor, pendingDrawMin, difficulty)
+  );
   if (valid.length === 0) return null;
 
   if (difficulty === 'normal') {
